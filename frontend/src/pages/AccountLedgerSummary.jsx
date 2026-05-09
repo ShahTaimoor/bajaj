@@ -1,0 +1,2049 @@
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { useReactToPrint } from 'react-to-print';
+import { Users, Building2, Calendar, FileText, ChevronDown, Printer, Wallet } from 'lucide-react';
+import { useGetLedgerSummaryQuery, useGetCustomerDetailedTransactionsQuery, useGetSupplierDetailedTransactionsQuery, useGetAllEntriesQuery } from '../store/services/accountLedgerApi';
+import { useGetCustomersQuery } from '../store/services/customersApi';
+import { useGetSuppliersQuery } from '../store/services/suppliersApi';
+import { useGetBanksQuery } from '../store/services/banksApi';
+import { useGetBankReceiptsQuery } from '../store/services/bankReceiptsApi';
+import { useGetBankPaymentsQuery } from '../store/services/bankPaymentsApi';
+import { useLazyGetOrderByIdQuery, usePostMissingSalesToLedgerMutation, useSyncSalesLedgerMutation } from '../store/services/salesApi';
+import { useSyncPurchaseInvoicesLedgerMutation } from '../store/services/purchaseInvoicesApi';
+import { useLazyGetCashReceiptByIdQuery } from '../store/services/cashReceiptsApi';
+import { useLazyGetBankReceiptByIdQuery } from '../store/services/bankReceiptsApi';
+import { useLazyGetPurchaseInvoiceQuery } from '../store/services/purchaseInvoicesApi';
+import { useLazyGetSaleReturnQuery } from '../store/services/saleReturnsApi';
+import { useLazyGetPurchaseReturnQuery } from '../store/services/purchaseReturnsApi';
+
+import PrintModal from '../components/PrintModal';
+import { PrintModal as BasePrintModal, ReturnPrintContent } from '../components/print';
+import ReceiptPaymentPrintModal from '../components/ReceiptPaymentPrintModal';
+import { LoadingSpinner } from '../components/LoadingSpinner';
+import { useCompanyInfo } from '../hooks/useCompanyInfo';
+import { handleApiError } from '../utils/errorHandler';
+import { getId } from '../utils/entityId';
+import { toast } from 'sonner';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { useTableRowVirtualizer, getVirtualTablePadding } from '../hooks/useTableRowVirtualizer';
+import PageShell from '../components/PageShell';
+import { useGetAccountsQuery } from '../store/services/chartOfAccountsApi';
+
+const AccountLedgerSummary = () => {
+  const ALL_BANKS_VALUE = '__all_banks__';
+
+  // Default range: first day of current month → today (ledger reports expect history; "today only" hid prior expenses)
+  const getDefaultDateRange = () => {
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = String(today.getMonth() + 1).padStart(2, '0');
+    const day = String(today.getDate()).padStart(2, '0');
+    const todayStr = `${year}-${month}-${day}`;
+    const startOfMonthStr = `${year}-${month}-01`;
+
+    return {
+      startDate: startOfMonthStr,
+      endDate: todayStr
+    };
+  };
+
+  const defaultDates = getDefaultDateRange();
+
+  const [selectedCustomerId, setSelectedCustomerId] = useState('');
+  const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
+  const [customerSearchQuery, setCustomerSearchQuery] = useState('');
+  const [debouncedCustomerQuery, setDebouncedCustomerQuery] = useState('');
+  const customerDropdownRef = useRef(null);
+
+  const [selectedSupplierId, setSelectedSupplierId] = useState('');
+  const [showSupplierDropdown, setShowSupplierDropdown] = useState(false);
+  const [supplierSearchQuery, setSupplierSearchQuery] = useState('');
+  const [debouncedSupplierQuery, setDebouncedSupplierQuery] = useState('');
+  const [selectedBankId, setSelectedBankId] = useState('');
+  const [selectedExpenseAccountCode, setSelectedExpenseAccountCode] = useState('');
+  const supplierDropdownRef = useRef(null);
+  const printRef = useRef(null);
+
+  const [showPrintModal, setShowPrintModal] = useState(false);
+  const [printData, setPrintData] = useState(null);
+  const [printDocumentTitle, setPrintDocumentTitle] = useState('Invoice');
+  const [printPartyLabel, setPrintPartyLabel] = useState('Customer');
+  const [showReceiptPrintModal, setShowReceiptPrintModal] = useState(false);
+  const [receiptPrintData, setReceiptPrintData] = useState(null);
+  const [receiptPrintTitle, setReceiptPrintTitle] = useState('Receipt');
+  const [printLoading, setPrintLoading] = useState(false);
+
+  const [getOrderById] = useLazyGetOrderByIdQuery();
+  const [postMissingSalesToLedger, { isLoading: isBackfillLoading }] = usePostMissingSalesToLedgerMutation();
+  const [syncSalesLedger, { isLoading: isSyncLoading }] = useSyncSalesLedgerMutation();
+  const [syncPurchaseInvoicesLedger, { isLoading: isSyncPurchaseLoading }] = useSyncPurchaseInvoicesLedgerMutation();
+  const [getCashReceiptById] = useLazyGetCashReceiptByIdQuery();
+  const [getBankReceiptById] = useLazyGetBankReceiptByIdQuery();
+  const [getPurchaseInvoiceById] = useLazyGetPurchaseInvoiceQuery();
+  const [getSaleReturnById] = useLazyGetSaleReturnQuery();
+  const [getPurchaseReturnById] = useLazyGetPurchaseReturnQuery();
+  const { companyInfo } = useCompanyInfo();
+
+  const [showReturnPrintModal, setShowReturnPrintModal] = useState(false);
+  const [returnPrintData, setReturnPrintData] = useState(null);
+
+  const [filters, setFilters] = useState({
+    startDate: defaultDates.startDate,
+    endDate: defaultDates.endDate,
+    search: ''
+  });
+
+  const [showReturnColumn, setShowReturnColumn] = useState(() => {
+    const saved = localStorage.getItem('accountLedgerShowReturnColumn');
+    return saved === null ? true : saved === 'true';
+  });
+
+  useEffect(() => {
+    const handler = () => {
+      const saved = localStorage.getItem('accountLedgerShowReturnColumn');
+      setShowReturnColumn(saved === null ? true : saved === 'true');
+    };
+    window.addEventListener('accountLedgerConfigChanged', handler);
+    return () => window.removeEventListener('accountLedgerConfigChanged', handler);
+  }, []);
+
+  // Close dropdowns when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (customerDropdownRef.current && !customerDropdownRef.current.contains(event.target)) {
+        setShowCustomerDropdown(false);
+      }
+      if (supplierDropdownRef.current && !supplierDropdownRef.current.contains(event.target)) {
+        setShowSupplierDropdown(false);
+      }
+    };
+
+    if (showCustomerDropdown || showSupplierDropdown) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showCustomerDropdown, showSupplierDropdown]);
+
+  // Fetch customers for dropdown
+  const { data: customersData, isLoading: customersLoading } = useGetCustomersQuery(
+    { search: customerSearchQuery, limit: 100 },
+    { refetchOnMountOrArgChange: true }
+  );
+
+  const allCustomers = useMemo(() => {
+    return customersData?.data?.customers || customersData?.customers || customersData?.data || customersData || [];
+  }, [customersData]);
+
+  // Fetch suppliers for dropdown
+  const { data: suppliersData, isLoading: suppliersLoading } = useGetSuppliersQuery(
+    { search: debouncedSupplierQuery, limit: 100 },
+    { refetchOnMountOrArgChange: true }
+  );
+
+  const allSuppliers = useMemo(() => {
+    return suppliersData?.data?.suppliers || suppliersData?.suppliers || suppliersData?.data || suppliersData || [];
+  }, [suppliersData]);
+
+  const { data: banksData } = useGetBanksQuery({ isActive: true }, { skip: false });
+  const banks = useMemo(() => {
+    return banksData?.data?.banks || banksData?.banks || [];
+  }, [banksData]);
+
+  const { data: bankReceiptsData } = useGetBankReceiptsQuery(
+    {
+      fromDate: filters.startDate,
+      toDate: filters.endDate,
+      page: 1,
+      limit: 1000
+    },
+    { refetchOnMountOrArgChange: true }
+  );
+
+  const { data: bankPaymentsData } = useGetBankPaymentsQuery(
+    {
+      fromDate: filters.startDate,
+      toDate: filters.endDate,
+      page: 1,
+      limit: 1000
+    },
+    { refetchOnMountOrArgChange: true }
+  );
+
+  // Build query params with customerId and supplierId
+  const queryParams = useMemo(() => {
+    const params = { ...filters };
+    if (selectedCustomerId) {
+      params.customerId = selectedCustomerId;
+    }
+    if (selectedSupplierId) {
+      params.supplierId = selectedSupplierId;
+    }
+    if (selectedExpenseAccountCode) {
+      params.expenseAccountCode = selectedExpenseAccountCode;
+    }
+    return params;
+  }, [filters, selectedCustomerId, selectedSupplierId, selectedExpenseAccountCode]);
+
+  // Fetch ledger summary - refetch on mount and when args change to ensure fresh data
+  const { data: summaryData, isLoading, error, refetch } = useGetLedgerSummaryQuery(queryParams, {
+    refetchOnMountOrArgChange: true, // Always refetch on mount or when query params change
+    refetchOnFocus: true, // Refetch when window regains focus
+    refetchOnReconnect: true, // Refetch when connection is restored
+    onError: (error) => handleApiError(error, 'Error fetching ledger summary')
+  });
+
+  /** Expense account dropdown: must list all GL expense accounts from chart — not only accounts with postings in the filtered period (otherwise the select is empty/"None" when the period has no activity). */
+  const { data: expenseCoaRaw } = useGetAccountsQuery(
+    { accountType: 'expense', isActive: 'true', limit: 500 },
+    { refetchOnMountOrArgChange: false }
+  );
+
+  // Refetch when sale return or other ledger-affecting action happens (e.g. from another tab)
+  useEffect(() => {
+    const handler = () => refetch();
+    window.addEventListener('accountLedgerInvalidate', handler);
+    return () => window.removeEventListener('accountLedgerInvalidate', handler);
+  }, [refetch]);
+
+  // Fetch detailed transactions for selected customer
+  const { data: detailedTransactionsData, isLoading: detailedLoading } = useGetCustomerDetailedTransactionsQuery(
+    {
+      customerId: selectedCustomerId,
+      startDate: filters.startDate,
+      endDate: filters.endDate
+    },
+    {
+      skip: !selectedCustomerId,
+      onError: (error) => handleApiError(error, 'Error fetching detailed transactions')
+    }
+  );
+
+  // Fetch detailed transactions for selected supplier
+  const { data: detailedSupplierTransactionsData, isLoading: detailedSupplierLoading } = useGetSupplierDetailedTransactionsQuery(
+    {
+      supplierId: selectedSupplierId,
+      startDate: filters.startDate,
+      endDate: filters.endDate
+    },
+    {
+      skip: !selectedSupplierId,
+      onError: (error) => handleApiError(error, 'Error fetching detailed supplier transactions')
+    }
+  );
+
+  // Fetch all ledger entries so Bank filter works even without customer/supplier selection
+  const { data: allEntriesData } = useGetAllEntriesQuery(
+    { startDate: filters.startDate, endDate: filters.endDate, limit: 5000 },
+    { refetchOnMountOrArgChange: true }
+  );
+
+  // Derive single-customer view: backend may return data.openingBalance/data.customer/data.entries when customerId is set, or only data.customers.summary
+  const customerDetail = useMemo(() => {
+    if (!selectedCustomerId) return null;
+    const d = detailedTransactionsData?.data;
+    if (d?.openingBalance !== undefined || d?.customer) {
+      return {
+        openingBalance: d.openingBalance ?? 0,
+        closingBalance: d.closingBalance ?? d.openingBalance ?? 0,
+        returnTotal: d.returnTotal ?? 0,
+        customer: d.customer ?? {},
+        entries: Array.isArray(d.entries) ? d.entries : []
+      };
+    }
+    const summary = summaryData?.data?.customers?.summary;
+    const one = Array.isArray(summary) && summary.length === 1 ? summary[0] : summary?.find(s => (s?.id ?? s?._id) === selectedCustomerId);
+    if (!one) return null;
+    return {
+      openingBalance: one.openingBalance ?? 0,
+      closingBalance: one.closingBalance ?? one.openingBalance ?? 0,
+      returnTotal: one.returnTotal ?? 0,
+      customer: { id: one.id ?? one._id, name: one.name ?? '', accountCode: one.accountCode ?? '' },
+      entries: []
+    };
+  }, [selectedCustomerId, detailedTransactionsData?.data, summaryData?.data?.customers?.summary]);
+
+  const supplierDetail = useMemo(() => {
+    if (!selectedSupplierId) return null;
+    const d = detailedSupplierTransactionsData?.data;
+    if (d?.openingBalance !== undefined || d?.supplier) {
+      return {
+        openingBalance: d.openingBalance ?? 0,
+        closingBalance: d.closingBalance ?? d.openingBalance ?? 0,
+        supplier: d.supplier ?? {},
+        entries: Array.isArray(d.entries) ? d.entries : []
+      };
+    }
+    const summary = summaryData?.data?.suppliers?.summary;
+    const one = Array.isArray(summary) && summary.length === 1 ? summary[0] : summary?.find(s => (s?.id ?? s?._id) === selectedSupplierId);
+    if (!one) return null;
+    return {
+      openingBalance: one.openingBalance ?? 0,
+      closingBalance: one.closingBalance ?? one.openingBalance ?? 0,
+      supplier: { id: one.id ?? one._id, name: one.name ?? '', accountCode: one.accountCode ?? '' },
+      entries: []
+    };
+  }, [selectedSupplierId, detailedSupplierTransactionsData?.data, summaryData?.data?.suppliers?.summary]);
+
+  // Extract data from summary (must be before early return)
+  const allCustomersSummary = summaryData?.data?.customers?.summary || [];
+  const suppliers = summaryData?.data?.suppliers?.summary || [];
+  const banksSummary = summaryData?.data?.banks?.summary || [];
+  const customerTotals = summaryData?.data?.customers?.totals || {};
+  const supplierTotals = summaryData?.data?.suppliers?.totals || {};
+  const bankTotals = summaryData?.data?.banks?.totals || {};
+  const expenseSummaries = summaryData?.data?.expenses?.summary || [];
+  const expenseTotals = summaryData?.data?.expenses?.totals || {};
+
+  const expenseDropdownAccounts = useMemo(() => {
+    let rows = [];
+    const raw = expenseCoaRaw;
+    if (Array.isArray(raw)) rows = raw;
+    else if (Array.isArray(raw?.data)) rows = raw.data;
+    else if (Array.isArray(raw?.accounts)) rows = raw.accounts;
+
+    const fromCoa = (rows || [])
+      .filter((a) => {
+        const code = String(a.accountCode ?? a.account_code ?? '').trim();
+        return code && code !== '5000';
+      })
+      .map((a) => ({
+        accountCode: String(a.accountCode ?? a.account_code ?? '').trim(),
+        accountName: a.accountName ?? a.account_name ?? 'Expense',
+      }))
+      .sort((x, y) => x.accountCode.localeCompare(y.accountCode, undefined, { numeric: true }));
+
+    if (fromCoa.length > 0) return fromCoa;
+
+    return (expenseSummaries || []).map((r) => ({
+      accountCode: r.accountCode,
+      accountName: r.accountName || 'Expense',
+    }));
+  }, [expenseCoaRaw, expenseSummaries]);
+  const expenseAccountDetail = summaryData?.data?.expenseAccount;
+  const expenseLedgerEntries = selectedExpenseAccountCode ? (summaryData?.data?.entries || []) : [];
+  const period = summaryData?.data?.period || {};
+
+  const printLedgerRows = useMemo(() => {
+    if (selectedExpenseAccountCode) return expenseLedgerEntries;
+    if (selectedCustomerId) return customerDetail?.entries ?? detailedTransactionsData?.data?.entries ?? [];
+    return supplierDetail?.entries ?? detailedSupplierTransactionsData?.data?.entries ?? [];
+  }, [
+    selectedExpenseAccountCode,
+    expenseLedgerEntries,
+    selectedCustomerId,
+    customerDetail?.entries,
+    detailedTransactionsData?.data?.entries,
+    supplierDetail?.entries,
+    detailedSupplierTransactionsData?.data?.entries,
+  ]);
+
+  const printOpeningBal = useMemo(() => {
+    if (selectedExpenseAccountCode) return expenseAccountDetail?.openingBalance ?? 0;
+    if (selectedCustomerId) return customerDetail?.openingBalance ?? detailedTransactionsData?.data?.openingBalance ?? 0;
+    return supplierDetail?.openingBalance ?? detailedSupplierTransactionsData?.data?.openingBalance ?? 0;
+  }, [
+    selectedExpenseAccountCode,
+    expenseAccountDetail?.openingBalance,
+    selectedCustomerId,
+    customerDetail?.openingBalance,
+    detailedTransactionsData?.data?.openingBalance,
+    supplierDetail?.openingBalance,
+    detailedSupplierTransactionsData?.data?.openingBalance,
+  ]);
+
+  const printPartyHeader = useMemo(() => {
+    if (selectedExpenseAccountCode) {
+      const code = expenseAccountDetail?.accountCode || selectedExpenseAccountCode;
+      return {
+        line1: expenseAccountDetail?.accountName || 'Expense account',
+        line2: code ? `Account code: ${code}` : '',
+      };
+    }
+    if (selectedCustomerId) {
+      return {
+        line1: customerDetail?.customer?.name || detailedTransactionsData?.data?.customer?.name || 'Customer Receivables',
+        line2: (customerDetail?.customer?.accountCode ?? detailedTransactionsData?.data?.customer?.accountCode)
+          ? `Account code: ${customerDetail?.customer?.accountCode ?? detailedTransactionsData?.data?.customer?.accountCode}`
+          : '',
+      };
+    }
+    return {
+      line1: supplierDetail?.supplier?.name || detailedSupplierTransactionsData?.data?.supplier?.name || 'Supplier Payables',
+      line2: (supplierDetail?.supplier?.accountCode ?? detailedSupplierTransactionsData?.data?.supplier?.accountCode)
+        ? `Account code: ${supplierDetail?.supplier?.accountCode ?? detailedSupplierTransactionsData?.data?.supplier?.accountCode}`
+        : '',
+    };
+  }, [selectedExpenseAccountCode, expenseAccountDetail, selectedCustomerId, customerDetail, detailedTransactionsData, supplierDetail, detailedSupplierTransactionsData]);
+
+  const printShowReturnCol = showReturnColumn && !!selectedCustomerId && !selectedExpenseAccountCode;
+
+  // Filter customers based on selection (must be before early return)
+  const customers = useMemo(() => {
+    if (!selectedCustomerId) return [];
+    return allCustomersSummary.filter(c => {
+      const customerId = getId(c)?.toString();
+      const selectedId = selectedCustomerId?.toString();
+      return customerId === selectedId;
+    });
+  }, [allCustomersSummary, selectedCustomerId]);
+
+  // Filter customers for dropdown (search by business name, company name, name)
+  const filteredCustomers = useMemo(() => {
+    if (!customerSearchQuery.trim()) return allCustomers.slice(0, 50);
+    const query = customerSearchQuery.toLowerCase();
+    return allCustomers.filter(customer => {
+      const businessName = (customer.businessName || customer.business_name || '').toLowerCase();
+      const companyName = (customer.companyName || customer.company_name || '').toLowerCase();
+      const name = (customer.name || '').toLowerCase();
+      const email = (customer.email || '').toLowerCase();
+      const phone = (customer.phone || '').toLowerCase();
+      return businessName.includes(query) || companyName.includes(query) || name.includes(query) || email.includes(query) || phone.includes(query);
+    }).slice(0, 50);
+  }, [allCustomers, customerSearchQuery]);
+
+  // Filter suppliers based on selection (must be before early return)
+  const filteredSuppliersList = useMemo(() => {
+    if (!selectedSupplierId) return [];
+    return suppliers.filter(s => {
+      const supplierId = getId(s)?.toString();
+      const selectedId = selectedSupplierId?.toString();
+      return supplierId === selectedId;
+    });
+  }, [suppliers, selectedSupplierId]);
+
+  // Filter suppliers for dropdown (search by business name, company name, name)
+  const filteredSuppliers = useMemo(() => {
+    if (!supplierSearchQuery.trim()) return allSuppliers.slice(0, 50);
+    const query = supplierSearchQuery.toLowerCase();
+    return allSuppliers.filter(supplier => {
+      const companyName = (supplier.companyName || supplier.company_name || '').toLowerCase();
+      const businessName = (supplier.businessName || supplier.business_name || '').toLowerCase();
+      const name = (supplier.name || '').toLowerCase();
+      const email = (supplier.email || '').toLowerCase();
+      const phone = (supplier.phone || '').toLowerCase();
+      return companyName.includes(query) || businessName.includes(query) || name.includes(query) || email.includes(query) || phone.includes(query);
+    }).slice(0, 50);
+  }, [allSuppliers, supplierSearchQuery]);
+
+  const handleFilterChange = (field, value) => {
+    setFilters({ ...filters, [field]: value });
+  };
+
+  const allEntries = allEntriesData?.data?.entries || [];
+  const currentEntries = selectedCustomerId
+    ? (customerDetail?.entries ?? detailedTransactionsData?.data?.entries ?? [])
+    : (selectedSupplierId ? (supplierDetail?.entries ?? detailedSupplierTransactionsData?.data?.entries ?? []) : allEntries);
+
+  const resolveBankName = (entry) => {
+    if (entry?.bankName) return entry.bankName;
+    if (entry?.bank_name) return entry.bank_name;
+    if (entry?.bankAccount) return entry.bankAccount;
+    if (entry?.bank_account) return entry.bank_account;
+    if (entry?.bank?.bankName) return entry.bank.bankName;
+    if (entry?.bank?.name) return entry.bank.name;
+    if (entry?.bank?.accountName) return entry.bank.accountName;
+    const bankId = entry?.bank?._id || entry?.bank?.id || entry?.bankId || entry?.bank_id || entry?.bank;
+    if (bankId) {
+      const bank = (banks || []).find(b => String(b._id || b.id) === String(bankId));
+      if (bank?.bankName) return bank.bankName;
+    }
+
+    // Fallback for manual entries (like JVs) that hit the bank account
+    if (entry?.accountCode === '1001' && (banks || []).length === 1) {
+      return banks[0].bankName;
+    }
+
+    // Fallback for manual entries (like JVs) that hit the bank account
+    if ((banks || []).length === 1) {
+      if (entry?.accountCode === '1001' || entry?.accountCode === String(banks[0].accountNumber)) {
+        return banks[0].bankName;
+      }
+    }
+
+    return '-';
+  };
+
+  const resolveBankId = (entry) => {
+    const directId = entry?.bank?._id || entry?.bank?.id || entry?.bankId || entry?.bank_id || entry?.bank || '';
+    if (directId) return directId;
+
+    // Fallback for manual entries (like JVs) that hit the bank account
+    if ((banks || []).length === 1) {
+      if (entry?.accountCode === '1001' || entry?.accountCode === String(banks[0].accountNumber)) {
+        return banks[0]._id || banks[0].id || '';
+      }
+    }
+
+    const explicitName = String(entry?.bankName || entry?.bank?.bankName || '').trim().toLowerCase();
+    if (explicitName) {
+      const byName = (banks || []).find((b) => String(b?.bankName || '').trim().toLowerCase() === explicitName);
+      if (byName) return byName._id || byName.id || '';
+    }
+
+    const particularText = String(entry?.particular || entry?.description || '').toLowerCase();
+    if (particularText) {
+      const fromParticular = (banks || []).find((b) =>
+        particularText.includes(String(b?.bankName || '').trim().toLowerCase())
+      );
+      if (fromParticular) return fromParticular._id || fromParticular.id || '';
+    }
+
+    return '';
+  };
+
+  const selectedBank = useMemo(
+    () => (banks || []).find((b) => String(b._id || b.id) === String(selectedBankId)),
+    [banks, selectedBankId]
+  );
+
+  const bankLedgerRows = useMemo(() => {
+    // BANK LEDGER REFACTOR: 
+    // We only use data from the Account Ledger for account 1001 (Bank GL)
+    // because it is the single source of truth that captures all Receipts, 
+    // Payments, and Journal Vouchers.
+    const filteredRows = (allEntries || [])
+      .filter((entry) => {
+        const accCode = String(entry?.accountCode || '').trim();
+
+        // 1. PRIMARY MATCH: Account Code 1001 (General Bank GL)
+        if (accCode === '1001') return true;
+
+        // 2. SECONDARY MATCH: Specific Bank Account Number if known
+        if (selectedBank?.accountNumber && accCode === String(selectedBank.accountNumber).trim()) return true;
+
+        return false;
+      })
+      .map((entry) => ({
+        date: entry?.date || entry?.transactionDate,
+        voucherNo: entry?.voucherNo || entry?.referenceNumber || '-',
+        bankId: resolveBankId(entry),
+        bankName: resolveBankName(entry),
+        particular: entry?.particular || entry?.description || '-',
+        accountCode: String(entry?.accountCode || '').trim(),
+        debitAmount: Number(entry?.debitAmount) || 0,
+        creditAmount: Number(entry?.creditAmount) || 0,
+      }));
+
+    return filteredRows
+      .filter(entry => {
+        if (!selectedBankId) return false;
+        if (selectedBankId === ALL_BANKS_VALUE) return true;
+
+        // Match by explicit bankId (associated in back-end or through resolveBankId)
+        if (String(entry.bankId) === String(selectedBankId)) return true;
+
+        // If only one bank exists, all '1001' entries belong to it
+        if ((banks || []).length === 1 && entry.accountCode === '1001') return true;
+
+        return false;
+      })
+      .sort((a, b) => {
+        const aTime = new Date(a.date || 0).getTime();
+        const bTime = new Date(b.date || 0).getTime();
+        if (aTime !== bTime) return aTime - bTime;
+        return String(a.voucherNo).localeCompare(String(b.voucherNo));
+      })
+      .map((entry, index, array) => {
+        // Calculate running balance
+        // Determine the opening balance for the selected context
+        let baseOpening = 0;
+        if (selectedBankId === ALL_BANKS_VALUE) {
+          baseOpening = bankTotals.openingBalance || 0;
+        } else {
+          const bankSum = banksSummary.find(b => String(b.id) === String(selectedBankId));
+          baseOpening = bankSum ? bankSum.openingBalance : (selectedBank?.openingBalance || selectedBank?.opening_balance || 0);
+        }
+
+        // Running balance = baseOpening + Sum(all debits up to now) - Sum(all credits up to now)
+        const previousEntries = array.slice(0, index + 1);
+        const runningBalance = baseOpening +
+          previousEntries.reduce((sum, e) => sum + (e.debitAmount || 0), 0) -
+          previousEntries.reduce((sum, e) => sum + (e.creditAmount || 0), 0);
+
+        return { ...entry, balance: runningBalance };
+      });
+  }, [allEntries, banks, selectedBankId, selectedBank, ALL_BANKS_VALUE, banksSummary, bankTotals]);
+
+  /** Align footer with the last row's running Balance column. API `banksSummary.closingBalance` can be wrong/stale. */
+  const bankLedgerFinalClosingBalance = useMemo(() => {
+    if (bankLedgerRows.length > 0) {
+      return Number(bankLedgerRows[bankLedgerRows.length - 1].balance) || 0;
+    }
+    if (selectedBankId === ALL_BANKS_VALUE) {
+      return Number(bankTotals.openingBalance) || 0;
+    }
+    const bankSum = banksSummary.find((b) => String(b.id) === String(selectedBankId));
+    return Number(
+      bankSum?.openingBalance ??
+        selectedBank?.openingBalance ??
+        selectedBank?.opening_balance ??
+        0
+    );
+  }, [bankLedgerRows, selectedBankId, ALL_BANKS_VALUE, bankTotals, banksSummary, selectedBank]);
+
+  const customerEntries = useMemo(
+    () => customerDetail?.entries ?? detailedTransactionsData?.data?.entries ?? [],
+    [customerDetail?.entries, detailedTransactionsData?.data?.entries]
+  );
+  const supplierEntries = useMemo(
+    () => supplierDetail?.entries ?? detailedSupplierTransactionsData?.data?.entries ?? [],
+    [supplierDetail?.entries, detailedSupplierTransactionsData?.data?.entries]
+  );
+
+  const virtualizeCustomerLedgerRows = Boolean(selectedCustomerId && customerEntries.length > 35);
+  const virtualizeSupplierLedgerRows = Boolean(selectedSupplierId && supplierEntries.length > 35);
+  const virtualizeBankLedgerRows = bankLedgerRows.length > 35;
+
+  const { scrollRef: customerLedgerScrollRef, virtualizer: customerLedgerVirtualizer } = useTableRowVirtualizer({
+    rowCount: customerEntries.length,
+    enabled: virtualizeCustomerLedgerRows,
+    estimateSize: 52,
+  });
+  const { scrollRef: supplierLedgerScrollRef, virtualizer: supplierLedgerVirtualizer } = useTableRowVirtualizer({
+    rowCount: supplierEntries.length,
+    enabled: virtualizeSupplierLedgerRows,
+    estimateSize: 56,
+  });
+  const { scrollRef: bankLedgerScrollRef, virtualizer: bankLedgerVirtualizer } = useTableRowVirtualizer({
+    rowCount: bankLedgerRows.length,
+    enabled: virtualizeBankLedgerRows,
+    estimateSize: 48,
+  });
+
+  const virtualizeExpenseLedgerRows = Boolean(selectedExpenseAccountCode && expenseLedgerEntries.length > 35);
+  const { scrollRef: expenseLedgerScrollRef, virtualizer: expenseLedgerVirtualizer } = useTableRowVirtualizer({
+    rowCount: expenseLedgerEntries.length,
+    enabled: virtualizeExpenseLedgerRows,
+    estimateSize: 52,
+  });
+
+  const handleClearFilters = () => {
+    setFilters({
+      startDate: defaultDates.startDate,
+      endDate: defaultDates.endDate,
+      search: ''
+    });
+    setSelectedCustomerId('');
+    setCustomerSearchQuery('');
+    setDebouncedCustomerQuery('');
+    setSelectedSupplierId('');
+    setSupplierSearchQuery('');
+    setDebouncedSupplierQuery('');
+    setSelectedBankId('');
+    setSelectedExpenseAccountCode('');
+  };
+
+  const handleExpenseAccountChange = (code) => {
+    const next = code || '';
+    setSelectedExpenseAccountCode(next);
+    if (next) {
+      setSelectedCustomerId('');
+      setCustomerSearchQuery('');
+      setDebouncedCustomerQuery('');
+      setSelectedSupplierId('');
+      setSupplierSearchQuery('');
+      setDebouncedSupplierQuery('');
+      setSelectedBankId('');
+    }
+  };
+
+  const handleCustomerSelect = (customer) => {
+    setSelectedCustomerId(getId(customer));
+    const businessName = customer.businessName || customer.business_name || customer.companyName || customer.company_name || '';
+    const label = businessName || customer.name || '';
+    setCustomerSearchQuery(label);
+    setDebouncedCustomerQuery(label.trim());
+    setShowCustomerDropdown(false);
+    // Clear other selections when customer is selected
+    setSelectedSupplierId('');
+    setSupplierSearchQuery('');
+    setDebouncedSupplierQuery('');
+    setSelectedBankId('');
+    setSelectedExpenseAccountCode('');
+  };
+
+  const handleSupplierSelect = (supplier) => {
+    setSelectedSupplierId(getId(supplier));
+    setSupplierSearchQuery(supplier.companyName || supplier.name || '');
+    setDebouncedSupplierQuery((supplier.companyName || supplier.name || '').trim());
+    setShowSupplierDropdown(false);
+    // Clear other selections when supplier is selected
+    setSelectedExpenseAccountCode('');
+    setSelectedCustomerId('');
+    setCustomerSearchQuery('');
+    setDebouncedCustomerQuery('');
+    setSelectedBankId('');
+  };
+
+  const formatCurrency = (amount) => {
+    const n = Number(amount);
+    if (n !== n) return '0'; // NaN
+    return new Intl.NumberFormat('en-US', {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0
+    }).format(n);
+  };
+
+  // Safe sum for ledger totals (entries may have numeric strings from API)
+  const sumDebits = (entries) => (entries ?? []).reduce((sum, e) => sum + (Number(e.debitAmount) || 0), 0);
+  const sumCredits = (entries) => (entries ?? []).reduce((sum, e) => sum + (Number(e.creditAmount) || 0), 0);
+  // Closing balance calculation:
+  // For Supplier Payables (liability): Opening + Credits - Debits (credits increase what you owe, debits decrease)
+  // For Customer Receivables (asset): Opening + Debits - Credits (debits increase what they owe, credits decrease)
+  // Since we're showing supplier payables when supplier is selected, use: Opening + Credits - Debits
+  const closingBalanceFromEntries = (openingBalance, entries, isSupplier = false) => {
+    const opening = Number(openingBalance) || 0;
+    const debits = sumDebits(entries);
+    const credits = sumCredits(entries);
+    // For suppliers (AP/liability): Credits increase balance, Debits decrease balance
+    // For customers (AR/asset): Debits increase balance, Credits decrease balance
+    return isSupplier ? opening + credits - debits : opening + debits - credits;
+  };
+
+  const formatDate = (date) => {
+    if (!date) return '';
+    const d = new Date(date);
+    const day = d.getDate().toString().padStart(2, '0');
+    const month = d.toLocaleDateString('en-US', { month: 'short' });
+    const year = d.getFullYear().toString().slice(-2);
+    return `${day}-${month}-${year}`;
+  };
+
+  const isSaleLikeSource = (source) => {
+    const src = String(source || '').toLowerCase().trim();
+    return src === 'sale' || src === 'sales' || src === 'sale_invoice' || src === 'sales_invoice' || src === 'sale_payment';
+  };
+
+  const isPrintableCustomerRow = (entry) => {
+    const src = String(entry?.source || '').toLowerCase().trim();
+    return (
+      isSaleLikeSource(src) ||
+      src === 'sale return' ||
+      src === 'cash_receipt' ||
+      src === 'bank_receipt'
+    );
+  };
+
+  const handlePrintEntry = async (entry) => {
+    if (!entry?.referenceId || !entry?.source) {
+      toast.error('Print not available for this row.');
+      return;
+    }
+    const refId = String(entry.referenceId || '').trim();
+    if (!refId) {
+      toast.error('Print not available for this row.');
+      return;
+    }
+    setPrintLoading(true);
+    setPrintData(null);
+    try {
+      const src = (entry.source || '').toLowerCase();
+      if (isSaleLikeSource(src)) {
+        const result = await getOrderById(refId).unwrap();
+        const order = result?.order || result?.data?.order || result;
+        if (order) {
+          setPrintDocumentTitle('Sales Invoice');
+          setPrintPartyLabel('Customer');
+          setPrintData(order);
+          setShowPrintModal(true);
+        } else {
+          toast.error('Could not load sale for printing.');
+        }
+      } else if (src === 'cash_receipt') {
+        const result = await getCashReceiptById(refId).unwrap();
+        const receipt = result?.data || result;
+        if (receipt) {
+          setReceiptPrintTitle('Cash Receipt');
+          setReceiptPrintData(receipt);
+          setShowReceiptPrintModal(true);
+        } else {
+          toast.error('Could not load receipt for printing.');
+        }
+      } else if (src === 'bank_receipt') {
+        const result = await getBankReceiptById(refId).unwrap();
+        const receipt = result?.data || result;
+        if (receipt) {
+          setReceiptPrintTitle('Bank Receipt');
+          setReceiptPrintData(receipt);
+          setShowReceiptPrintModal(true);
+        } else {
+          toast.error('Could not load bank receipt for printing.');
+        }
+      } else if (src === 'purchase' || src === 'purchase_invoice' || src === 'purchase_invoice_payment') {
+        const result = await getPurchaseInvoiceById(refId).unwrap();
+        const invoice = result?.invoice || result?.data?.invoice || result?.data || result;
+        if (invoice) {
+          setPrintDocumentTitle('Purchase Invoice');
+          setPrintPartyLabel('Supplier');
+          setPrintData(invoice);
+          setShowPrintModal(true);
+        } else {
+          toast.error('Could not load purchase invoice for printing.');
+        }
+      } else if (src === 'cash_payment' || src === 'bank_payment') {
+        toast('Print this payment from Cash Payments or Bank Payments page.');
+      } else if (src === 'sale return') {
+        const result = await getSaleReturnById(refId).unwrap();
+        const saleReturn = result?.data || result;
+        if (saleReturn) {
+          setReturnPrintData(saleReturn);
+          setShowReturnPrintModal(true);
+        } else {
+          toast.error('Could not load sale return for printing.');
+        }
+      } else if (entry.source === 'Purchase Return') {
+        const result = await getPurchaseReturnById(refId).unwrap();
+        const purchaseReturn = result?.data || result;
+        if (purchaseReturn) {
+          setReturnPrintData(purchaseReturn);
+          setShowReturnPrintModal(true);
+        } else {
+          toast.error('Could not load purchase return for printing.');
+        }
+      } else {
+        toast('Print this document from the relevant module (e.g. Bank Receipts, Cash Payments, Sale Returns).');
+      }
+    } catch (err) {
+      handleApiError(err, 'Load document for print');
+      toast.error('Could not load document for printing.');
+    } finally {
+      setPrintLoading(false);
+    }
+  };
+
+
+
+  const handleBackfillSales = async () => {
+    try {
+      const result = await postMissingSalesToLedger({
+        dateFrom: filters.startDate,
+        dateTo: filters.endDate
+      }).unwrap();
+      const posted = result?.posted ?? 0;
+      const failed = result?.errors?.length ?? 0;
+      toast.success(`Backfilled ${posted} sale(s).${failed ? ` ${failed} failed.` : ''}`);
+      refetch();
+    } catch (err) {
+      handleApiError(err, 'Failed to backfill sales to ledger');
+    }
+  };
+
+  const handleSyncSalesLedger = async () => {
+    try {
+      const result = await syncSalesLedger({
+        dateFrom: filters.startDate,
+        dateTo: filters.endDate
+      }).unwrap();
+      const updated = result?.updated ?? 0;
+      const posted = result?.posted ?? 0;
+      const failed = result?.errors?.length ?? 0;
+      toast.success(`Synced ${updated} sale(s), posted ${posted}.${failed ? ` ${failed} failed.` : ''}`);
+      refetch();
+    } catch (err) {
+      handleApiError(err, 'Failed to sync sales ledger');
+    }
+  };
+
+  const handleSyncPurchaseLedger = async () => {
+    try {
+      const result = await syncPurchaseInvoicesLedger({
+        dateFrom: filters.startDate,
+        dateTo: filters.endDate
+      }).unwrap();
+      const updated = result?.updated ?? 0;
+      const posted = result?.posted ?? 0;
+      const failed = result?.errors?.length ?? 0;
+      toast.success(`Synced ${updated} purchase invoice(s), posted ${posted}.${failed ? ` ${failed} failed.` : ''}`);
+      refetch();
+    } catch (err) {
+      handleApiError(err, 'Failed to sync purchase invoices ledger');
+    }
+  };
+
+  const ledgerPartyName = selectedExpenseAccountCode
+    ? (expenseAccountDetail?.accountName || summaryData?.data?.expenseAccount?.accountName || 'Expense account')
+    : selectedCustomerId
+      ? (customerDetail?.customer?.name || detailedTransactionsData?.data?.customer?.name || 'Customer Receivables')
+      : (supplierDetail?.supplier?.name || detailedSupplierTransactionsData?.data?.supplier?.name || 'Supplier Payables');
+
+  const handleLedgerPrint = useReactToPrint({
+    contentRef: printRef,
+    documentTitle: `Account Ledger Summary - ${ledgerPartyName}`,
+    onBeforeGetContent: () => {
+      if (!printRef.current) {
+        toast.error('No content to print. Please select a customer, supplier, or expense account.');
+        return Promise.reject();
+      }
+      return Promise.resolve();
+    }
+  });
+
+  const handlePrint = () => {
+    if (!selectedCustomerId && !selectedSupplierId && !selectedExpenseAccountCode) {
+      toast.error('Please select a customer, supplier, or expense account to print.');
+      return;
+    }
+    handleLedgerPrint();
+  };
+
+  // Early return for error (after all hooks)
+  if (error) {
+    return (
+      <div className="flex justify-center items-center h-64">
+        <div className="text-center">
+          <p className="text-red-600 mb-4">Error loading ledger summary</p>
+          <Button onClick={() => refetch()} variant="default">
+            Retry
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <PageShell className="bg-gray-50" contentClassName="px-4 sm:px-6 py-6 space-y-6" maxWidthClassName="max-w-[1600px]">
+        {/* Header - professional card */}
+        <header className="bg-white border border-gray-200 rounded-lg shadow-sm px-6 py-5">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+            <div>
+              <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 tracking-tight">Account Ledger Summary</h1>
+              <p className="text-sm text-gray-500 mt-0.5">Customer receivables, supplier payables, banks, and expense accounts</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                onClick={handleSyncPurchaseLedger}
+                variant="outline"
+                size="sm"
+                className="flex items-center gap-2 border-gray-300 text-gray-700 hover:bg-gray-50"
+                disabled={isSyncPurchaseLoading}
+                title="Sync purchase invoices ledger for this date range"
+              >
+                <FileText className="h-4 w-4" />
+                {isSyncPurchaseLoading ? 'Syncing...' : 'Sync Purchase Ledger'}
+              </Button>
+              <Button
+                onClick={handleSyncSalesLedger}
+                variant="outline"
+                size="sm"
+                className="flex items-center gap-2 border-gray-300 text-gray-700 hover:bg-gray-50"
+                disabled={isSyncLoading}
+                title="Sync sales ledger for edited invoices in this date range"
+              >
+                <FileText className="h-4 w-4" />
+                {isSyncLoading ? 'Syncing...' : 'Sync Sales Ledger'}
+              </Button>
+              <Button
+                onClick={handleBackfillSales}
+                variant="outline"
+                size="sm"
+                className="flex items-center gap-2 border-gray-300 text-gray-700 hover:bg-gray-50"
+                disabled={isBackfillLoading}
+                title="Post missing sales to ledger for the selected date range"
+              >
+                <FileText className="h-4 w-4" />
+                {isBackfillLoading ? 'Backfilling...' : 'Backfill Sales'}
+              </Button>
+              <Button
+                onClick={handlePrint}
+                variant="outline"
+                size="sm"
+                className="flex items-center gap-2 border-gray-300 text-gray-700 hover:bg-gray-50"
+                disabled={!selectedCustomerId && !selectedSupplierId && !selectedExpenseAccountCode}
+                title={
+                  !selectedCustomerId && !selectedSupplierId && !selectedExpenseAccountCode
+                    ? 'Select a customer, supplier, or expense account to print'
+                    : 'Print ledger summary'
+                }
+              >
+                <Printer className="h-4 w-4" />
+                Print
+              </Button>
+
+            </div>
+          </div>
+        </header>
+
+        {/* Filters - clean card */}
+        <section className="bg-white border border-gray-200 rounded-lg shadow-sm p-5">
+          <h2 className="text-sm font-medium text-gray-700 mb-4 uppercase tracking-wide">Filters</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+            {/* Customer Dropdown */}
+            <div className="relative" ref={customerDropdownRef}>
+              <label className="block text-xs font-medium text-gray-600 mb-1.5">Customer</label>
+              <div className="relative">
+                <Input
+                  type="text"
+                  placeholder="Search or select..."
+                  value={customerSearchQuery}
+                  onChange={(e) => {
+                    setCustomerSearchQuery(e.target.value);
+                    setShowCustomerDropdown(true);
+                  }}
+                  onFocus={() => setShowCustomerDropdown(true)}
+                  className="w-full h-9 border-gray-300 text-sm"
+                />
+                <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
+                {showCustomerDropdown && filteredCustomers.length > 0 && (
+                  <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-md shadow-lg max-h-56 overflow-y-auto">
+                    {filteredCustomers.map((customer) => {
+                      const businessName = customer.businessName || customer.business_name || customer.companyName || customer.company_name || '';
+                      const displayName = businessName || customer.name || 'Unknown Customer';
+                      return (
+                        <button
+                          key={getId(customer) ?? displayName}
+                          onClick={() => handleCustomerSelect(customer)}
+                          className={`w-full text-left px-3 py-2.5 text-sm border-b border-gray-100 last:border-0 hover:bg-gray-50 ${selectedCustomerId == getId(customer) ? 'bg-gray-100' : ''}`}
+                        >
+                          <div className="text-sm font-medium text-gray-900">{displayName}</div>
+                          {businessName && customer.name && customer.name !== businessName && (
+                            <div className="text-xs text-gray-500">{customer.name}</div>
+                          )}
+                          {customer.email && (
+                            <div className="text-xs text-gray-500">{customer.email}</div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Supplier Dropdown */}
+            <div className="relative" ref={supplierDropdownRef}>
+              <label className="block text-xs font-medium text-gray-600 mb-1.5">Supplier</label>
+              <div className="relative">
+                <Input
+                  type="text"
+                  placeholder="Search or select..."
+                  value={supplierSearchQuery}
+                  onChange={(e) => {
+                    setSupplierSearchQuery(e.target.value);
+                    setShowSupplierDropdown(true);
+                  }}
+                  onFocus={() => setShowSupplierDropdown(true)}
+                  className="w-full h-9 border-gray-300 text-sm"
+                />
+                <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
+                {showSupplierDropdown && filteredSuppliers.length > 0 && (
+                  <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-md shadow-lg max-h-56 overflow-y-auto">
+                    {filteredSuppliers.map((supplier) => {
+                      const displayName = supplier.companyName || supplier.company_name || supplier.name || 'Unknown Supplier';
+                      return (
+                        <button
+                          key={getId(supplier) ?? displayName}
+                          onClick={() => handleSupplierSelect(supplier)}
+                          className={`w-full text-left px-3 py-2.5 text-sm border-b border-gray-100 last:border-0 hover:bg-gray-50 ${selectedSupplierId == getId(supplier) ? 'bg-gray-100' : ''}`}
+                        >
+                          <div className="text-sm font-medium text-gray-900">{displayName}</div>
+                          {supplier.name && supplier.name !== displayName && (
+                            <div className="text-xs text-gray-500">{supplier.name}</div>
+                          )}
+                          {supplier.email && (
+                            <div className="text-xs text-gray-500">{supplier.email}</div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Date range */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1.5">Date range</label>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="date"
+                  value={filters.startDate}
+                  onChange={(e) => handleFilterChange('startDate', e.target.value)}
+                  className="flex-1 min-w-0 h-9 border-gray-300 text-sm relative [&::-webkit-calendar-picker-indicator]:opacity-0 [&::-webkit-calendar-picker-indicator]:absolute [&::-webkit-calendar-picker-indicator]:inset-0 [&::-webkit-calendar-picker-indicator]:w-full [&::-webkit-calendar-picker-indicator]:h-full [&::-webkit-calendar-picker-indicator]:cursor-pointer"
+                />
+                <span className="text-gray-400 shrink-0">–</span>
+                <Input
+                  type="date"
+                  value={filters.endDate}
+                  onChange={(e) => handleFilterChange('endDate', e.target.value)}
+                  className="flex-1 min-w-0 h-9 border-gray-300 text-sm relative [&::-webkit-calendar-picker-indicator]:opacity-0 [&::-webkit-calendar-picker-indicator]:absolute [&::-webkit-calendar-picker-indicator]:inset-0 [&::-webkit-calendar-picker-indicator]:w-full [&::-webkit-calendar-picker-indicator]:h-full [&::-webkit-calendar-picker-indicator]:cursor-pointer"
+                />
+              </div>
+            </div>
+
+            {/* Bank */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1.5">Bank</label>
+              <select
+                value={selectedBankId}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setSelectedBankId(val);
+                  if (val) {
+                    // Clear customer/supplier/expense selections when bank is selected
+                    setSelectedCustomerId('');
+                    setCustomerSearchQuery('');
+                    setDebouncedCustomerQuery('');
+                    setSelectedSupplierId('');
+                    setSupplierSearchQuery('');
+                    setDebouncedSupplierQuery('');
+                    setSelectedExpenseAccountCode('');
+                  }
+                }}
+                autoComplete="off"
+                className="w-full h-9 border border-gray-300 rounded-md px-2 text-sm bg-white"
+              >
+                <option value="">Select Bank</option>
+                <option value={ALL_BANKS_VALUE}>All Banks</option>
+                {(banks || []).map((bank) => (
+                  <option key={bank._id || bank.id} value={bank._id || bank.id}>
+                    {bank.bankName}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Expense account (GL) */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1.5">Expense account</label>
+              <select
+                value={selectedExpenseAccountCode}
+                onChange={(e) => handleExpenseAccountChange(e.target.value)}
+                autoComplete="off"
+                className="w-full h-9 border border-gray-300 rounded-md px-2 text-sm bg-white"
+              >
+                <option value="">None</option>
+                {(expenseDropdownAccounts || []).map((row) => (
+                  <option key={row.accountCode} value={row.accountCode}>
+                    {row.accountCode} — {row.accountName || 'Expense'}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Clear */}
+            <div className="flex items-end">
+              <Button
+                onClick={handleClearFilters}
+                variant="outline"
+                size="sm"
+                className="w-full h-9 border-gray-300 text-gray-700"
+              >
+                Clear
+              </Button>
+            </div>
+          </div>
+        </section>
+
+        {isLoading ? (
+          <div className="flex justify-center items-center h-64">
+            <LoadingSpinner />
+          </div>
+        ) : (
+          <div className="space-y-6">
+            {/* Customers Section - Show only if customer is selected and supplier is not */}
+            {selectedCustomerId && !selectedSupplierId && !selectedExpenseAccountCode && (
+              <div className="bg-white border border-emerald-200 rounded-lg shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-emerald-200 bg-emerald-50">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-200">
+                      <Users className="h-5 w-5 text-emerald-700" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                        <h2 className="text-lg font-semibold text-gray-900">
+                          {customerDetail?.customer?.name || detailedTransactionsData?.data?.customer?.name || 'Customer Receivables'}
+                        </h2>
+                        {showReturnColumn && (
+                          <span className="text-sm text-gray-600">
+                            Return total: {formatCurrency(customerDetail?.returnTotal ?? detailedTransactionsData?.data?.returnTotal ?? 0)}
+                          </span>
+                        )}
+                      </div>
+                      {filters.startDate && filters.endDate && (
+                        <p className="text-xs text-gray-500 mt-1">
+                          {formatDate(filters.startDate)} – {formatDate(filters.endDate)}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {detailedLoading ? (
+                  <div className="flex justify-center items-center py-16">
+                    <LoadingSpinner />
+                  </div>
+                ) : (
+                  <div
+                    ref={customerLedgerScrollRef}
+                    className={`overflow-x-auto ${virtualizeCustomerLedgerRows ? 'max-h-[min(70vh,560px)] overflow-y-auto' : ''}`}
+                  >
+                    <table className="min-w-full account-ledger-table">
+                      <thead>
+                        <tr className="bg-emerald-600 border-b border-emerald-700">
+                          <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">Date</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">Voucher No</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">Particular</th>
+                          {showReturnColumn && (
+                            <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider w-20">Return</th>
+                          )}
+                          <th className="px-4 py-3 text-right text-xs font-medium text-white uppercase tracking-wider">Debits</th>
+                          <th className="px-4 py-3 text-right text-xs font-medium text-white uppercase tracking-wider">Credits</th>
+                          <th className="px-4 py-3 text-right text-xs font-medium text-white uppercase tracking-wider">Balance</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-white uppercase tracking-wider w-20 no-print">Print</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-200 bg-white">
+                        {/* Opening Balance Row */}
+                        <tr className="bg-emerald-50/50">
+                          <td className="px-4 py-3 text-sm text-gray-900"></td>
+                          <td className="px-4 py-3 text-sm text-gray-900"></td>
+                          <td className="px-4 py-3 text-sm font-medium text-gray-900">Opening Balance:</td>
+                          {showReturnColumn && <td className="px-4 py-3 text-sm text-gray-900"></td>}
+                          <td className="px-4 py-3 text-sm text-right text-gray-900"></td>
+                          <td className="px-4 py-3 text-sm text-right text-gray-900"></td>
+                          <td className={`px-4 py-3 text-sm text-right font-bold ${((customerDetail?.openingBalance ?? detailedTransactionsData?.data?.openingBalance) || 0) < 0 ? 'text-red-600' : 'text-gray-900'
+                            }`}>
+                            {formatCurrency(customerDetail?.openingBalance ?? detailedTransactionsData?.data?.openingBalance ?? 0)}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-center no-print"></td>
+                        </tr>
+
+                        {/* Transaction Rows */}
+                        {customerEntries.length === 0 ? (
+                          <tr>
+                            <td colSpan={showReturnColumn ? 8 : 7} className="px-4 py-8 text-center text-gray-500">
+                              <FileText className="h-8 w-8 mx-auto mb-2 text-gray-400" />
+                              <p>No transactions found for this period</p>
+                            </td>
+                          </tr>
+                        ) : !virtualizeCustomerLedgerRows ? (
+                          customerEntries.map((entry, index) => (
+                            <tr key={index} className="hover:bg-gray-50 transition-colors">
+                              <td className="px-4 py-3 text-sm text-gray-900">
+                                {formatDate(entry.date)}
+                              </td>
+                              <td className="px-4 py-3 text-sm text-gray-900">
+                                {entry.voucherNo || '-'}
+                              </td>
+                              <td className="px-4 py-3 text-sm text-gray-900">
+                                {entry.particular || '-'}
+                              </td>
+                              {showReturnColumn && (
+                                <td className="px-4 py-3 text-sm text-gray-900">
+                                  {entry.source === 'Sale Return' ? 'Return' : ''}
+                                </td>
+                              )}
+                              <td className="px-4 py-3 text-sm text-right text-gray-900">
+                                {entry.debitAmount > 0 ? formatCurrency(entry.debitAmount) : '0'}
+                              </td>
+                              <td className="px-4 py-3 text-sm text-right text-gray-900">
+                                {entry.creditAmount > 0 ? formatCurrency(entry.creditAmount) : '0'}
+                              </td>
+                              <td className={`px-4 py-3 text-sm text-right font-semibold ${(entry.balance || 0) < 0 ? 'text-red-600' : 'text-gray-900'
+                                }`}>
+                                {formatCurrency(entry.balance || 0)}
+                              </td>
+                              <td className="px-4 py-3 text-center no-print">
+                                {entry.referenceId && entry.source && isPrintableCustomerRow(entry) ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handlePrintEntry(entry)}
+                                    disabled={printLoading}
+                                    className="inline-flex items-center justify-center p-1.5 rounded-md text-gray-600 hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50"
+                                    title={String(entry.source || '').toLowerCase() === 'sale return' ? 'Print return' : (entry.source === 'cash_receipt' || entry.source === 'bank_receipt') ? 'Print receipt' : 'Print sale invoice'}
+                                  >
+                                    <Printer className="h-4 w-4" />
+                                  </button>
+                                ) : null}
+                              </td>
+                            </tr>
+                          ))
+                        ) : (
+                          (() => {
+                            const vItems = customerLedgerVirtualizer.getVirtualItems();
+                            const totalH = customerLedgerVirtualizer.getTotalSize();
+                            const { padTop, padBottom } = getVirtualTablePadding(vItems, totalH);
+                            const cs = showReturnColumn ? 8 : 7;
+                            return (
+                              <>
+                                {padTop > 0 ? (
+                                  <tr aria-hidden className="pointer-events-none">
+                                    <td colSpan={cs} className="p-0 border-0" style={{ height: padTop }} />
+                                  </tr>
+                                ) : null}
+                                {vItems.map((vr) => {
+                                  const entry = customerEntries[vr.index];
+                                  return (
+                                    <tr key={vr.key} className="hover:bg-gray-50 transition-colors" style={{ height: vr.size }}>
+                                      <td className="px-4 py-3 text-sm text-gray-900">
+                                        {formatDate(entry.date)}
+                                      </td>
+                                      <td className="px-4 py-3 text-sm text-gray-900">
+                                        {entry.voucherNo || '-'}
+                                      </td>
+                                      <td className="px-4 py-3 text-sm text-gray-900">
+                                        {entry.particular || '-'}
+                                      </td>
+                                      {showReturnColumn && (
+                                        <td className="px-4 py-3 text-sm text-gray-900">
+                                          {entry.source === 'Sale Return' ? 'Return' : ''}
+                                        </td>
+                                      )}
+                                      <td className="px-4 py-3 text-sm text-right text-gray-900">
+                                        {entry.debitAmount > 0 ? formatCurrency(entry.debitAmount) : '0'}
+                                      </td>
+                                      <td className="px-4 py-3 text-sm text-right text-gray-900">
+                                        {entry.creditAmount > 0 ? formatCurrency(entry.creditAmount) : '0'}
+                                      </td>
+                                      <td className={`px-4 py-3 text-sm text-right font-semibold ${(entry.balance || 0) < 0 ? 'text-red-600' : 'text-gray-900'
+                                        }`}>
+                                        {formatCurrency(entry.balance || 0)}
+                                      </td>
+                                      <td className="px-4 py-3 text-center no-print">
+                                        {entry.referenceId && entry.source && isPrintableCustomerRow(entry) ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => handlePrintEntry(entry)}
+                                            disabled={printLoading}
+                                            className="inline-flex items-center justify-center p-1.5 rounded-md text-gray-600 hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50"
+                                            title={String(entry.source || '').toLowerCase() === 'sale return' ? 'Print return' : (entry.source === 'cash_receipt' || entry.source === 'bank_receipt') ? 'Print receipt' : 'Print sale invoice'}
+                                          >
+                                            <Printer className="h-4 w-4" />
+                                          </button>
+                                        ) : null}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                                {padBottom > 0 ? (
+                                  <tr aria-hidden className="pointer-events-none">
+                                    <td colSpan={cs} className="p-0 border-0" style={{ height: padBottom }} />
+                                  </tr>
+                                ) : null}
+                              </>
+                            );
+                          })()
+                        )}
+
+                        {/* Return Total Row - shows when there are returns and return column is visible */}
+                        {showReturnColumn &&
+                          customerEntries.length > 0 &&
+                          (customerDetail?.returnTotal ?? detailedTransactionsData?.data?.returnTotal ?? 0) > 0 && (
+                            <tr className="bg-emerald-100 font-medium">
+                              <td className="px-4 py-3 text-sm text-gray-900"></td>
+                              <td className="px-4 py-3 text-sm text-gray-900"></td>
+                              <td className="px-4 py-3 text-sm text-gray-900">Return Total</td>
+                              <td className="px-4 py-3 text-sm font-medium text-gray-900">Return</td>
+                              <td className="px-4 py-3 text-sm text-right text-gray-900">0</td>
+                              <td className="px-4 py-3 text-sm text-right text-gray-900">
+                                {formatCurrency(customerDetail?.returnTotal ?? detailedTransactionsData?.data?.returnTotal ?? 0)}
+                              </td>
+                              <td className="px-4 py-3 text-sm text-right text-gray-900"></td>
+                              <td className="px-4 py-3 text-center no-print"></td>
+                            </tr>
+                          )}
+
+                        {/* Total Row */}
+                        {customerEntries.length > 0 && (
+                          <tr className="bg-emerald-200 font-semibold border-t-2 border-emerald-300">
+                            <td className="px-4 py-3 text-sm text-gray-900"></td>
+                            <td className="px-4 py-3 text-sm text-gray-900"></td>
+                            <td className="px-4 py-3 text-sm text-gray-900">Total</td>
+                            {showReturnColumn && <td className="px-4 py-3 text-sm text-gray-900"></td>}
+                            <td className="px-4 py-3 text-sm text-right text-gray-900">
+                              {formatCurrency(sumDebits(customerEntries))}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-right text-gray-900">
+                              {formatCurrency(sumCredits(customerEntries))}
+                            </td>
+                            <td className={`px-4 py-3 text-sm text-right font-bold ${closingBalanceFromEntries(customerDetail?.openingBalance ?? detailedTransactionsData?.data?.openingBalance ?? 0, customerEntries, false) < 0 ? 'text-red-600' : 'text-gray-900'}`}>
+                              {formatCurrency(closingBalanceFromEntries(customerDetail?.openingBalance ?? detailedTransactionsData?.data?.openingBalance ?? 0, customerEntries, false))}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-center no-print"></td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Suppliers Section - Show only if supplier is selected and customer is not */}
+            {selectedSupplierId && !selectedCustomerId && !selectedBankId && !selectedExpenseAccountCode && (
+              <div className="bg-white border border-blue-200 rounded-lg shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-blue-200 bg-blue-50">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-blue-200">
+                      <Building2 className="h-5 w-5 text-blue-700" />
+                    </div>
+                    <div>
+                      <h2 className="text-lg font-semibold text-gray-900">
+                        {supplierDetail?.supplier?.name || detailedSupplierTransactionsData?.data?.supplier?.name || 'Supplier Payables'}
+                      </h2>
+                      {filters.startDate && filters.endDate && (
+                        <p className="text-xs text-gray-500 mt-1">
+                          {formatDate(filters.startDate)} – {formatDate(filters.endDate)}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {detailedSupplierLoading ? (
+                  <div className="flex justify-center items-center py-16">
+                    <LoadingSpinner />
+                  </div>
+                ) : (
+                  <div
+                    ref={supplierLedgerScrollRef}
+                    className={`overflow-x-auto ${virtualizeSupplierLedgerRows ? 'max-h-[min(70vh,560px)] overflow-y-auto' : ''}`}
+                  >
+                    <table className="min-w-full account-ledger-table">
+                      <thead>
+                        <tr className="bg-blue-600 border-b border-blue-700">
+                          <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">Date</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">Voucher No</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">Particular</th>
+                          <th className="px-4 py-3 text-right text-xs font-medium text-white uppercase tracking-wider">Debits</th>
+                          <th className="px-4 py-3 text-right text-xs font-medium text-white uppercase tracking-wider">Credits</th>
+                          <th className="px-4 py-3 text-right text-xs font-medium text-white uppercase tracking-wider">Balance</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-white uppercase tracking-wider w-20 no-print">Print</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-200 bg-white">
+                        {/* Opening Balance Row */}
+                        <tr className="bg-blue-50/50">
+                          <td colSpan="3" className="px-4 py-3 text-sm font-medium text-gray-900">Opening Balance:</td>
+                          <td className="px-4 py-3 text-sm text-right text-gray-900">0</td>
+                          <td className="px-4 py-3 text-sm text-right text-gray-900">0</td>
+                          <td className={`px-4 py-3 text-sm text-right font-bold ${(supplierDetail?.openingBalance ?? detailedSupplierTransactionsData?.data?.openingBalance ?? 0) < 0 ? 'text-red-600' : 'text-gray-900'
+                            }`}>
+                            {formatCurrency(supplierDetail?.openingBalance ?? detailedSupplierTransactionsData?.data?.openingBalance ?? 0)}
+                          </td>
+                          <td className="px-4 py-3 text-center no-print"></td>
+                        </tr>
+
+                        {/* Transaction Entries */}
+                        {supplierEntries.length === 0 ? (
+                          <tr>
+                            <td colSpan="7" className="px-4 py-8 text-center text-gray-500">
+                              <FileText className="h-8 w-8 mx-auto mb-2 text-gray-400" />
+                              <p>No transactions found for this period</p>
+                            </td>
+                          </tr>
+                        ) : !virtualizeSupplierLedgerRows ? (
+                          supplierEntries.map((entry, index) => (
+                            <tr key={index} className="hover:bg-gray-50 transition-colors">
+                              <td className="px-4 py-3 text-sm text-gray-900">
+                                {formatDate(entry.date)}
+                              </td>
+                              <td className="px-4 py-3 text-sm text-gray-900">
+                                {entry.voucherNo || '-'}
+                              </td>
+                              <td className="px-4 py-3 text-sm text-gray-700 max-w-md whitespace-normal break-words">
+                                {entry.particular || '-'}
+                              </td>
+                              <td className="px-4 py-3 text-sm text-right text-gray-900">
+                                {entry.debitAmount > 0 ? formatCurrency(entry.debitAmount) : '0'}
+                              </td>
+                              <td className="px-4 py-3 text-sm text-right text-gray-900">
+                                {entry.creditAmount > 0 ? formatCurrency(entry.creditAmount) : '0'}
+                              </td>
+                              <td className={`px-4 py-3 text-sm text-right font-semibold ${(entry.balance || 0) < 0 ? 'text-red-600' : 'text-gray-900'
+                                }`}>
+                                {formatCurrency(entry.balance || 0)}
+                              </td>
+                              <td className="px-4 py-3 text-center no-print">
+                                {entry.referenceId && entry.source && ['purchase', 'Purchase Return', 'purchase_invoice', 'purchase_invoice_payment'].includes((entry.source || '').toString()) ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handlePrintEntry(entry)}
+                                    disabled={printLoading}
+                                    className="inline-flex items-center justify-center p-1.5 rounded-md text-gray-600 hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50"
+                                    title={entry.source === 'Purchase Return' ? 'Print return' : 'Print purchase invoice'}
+                                  >
+                                    <Printer className="h-4 w-4" />
+                                  </button>
+                                ) : null}
+                              </td>
+                            </tr>
+                          ))
+                        ) : (
+                          (() => {
+                            const vItems = supplierLedgerVirtualizer.getVirtualItems();
+                            const totalH = supplierLedgerVirtualizer.getTotalSize();
+                            const { padTop, padBottom } = getVirtualTablePadding(vItems, totalH);
+                            return (
+                              <>
+                                {padTop > 0 ? (
+                                  <tr aria-hidden className="pointer-events-none">
+                                    <td colSpan={7} className="p-0 border-0" style={{ height: padTop }} />
+                                  </tr>
+                                ) : null}
+                                {vItems.map((vr) => {
+                                  const entry = supplierEntries[vr.index];
+                                  return (
+                                    <tr key={vr.key} className="hover:bg-gray-50 transition-colors" style={{ height: vr.size }}>
+                                      <td className="px-4 py-3 text-sm text-gray-900">
+                                        {formatDate(entry.date)}
+                                      </td>
+                                      <td className="px-4 py-3 text-sm text-gray-900">
+                                        {entry.voucherNo || '-'}
+                                      </td>
+                                      <td className="px-4 py-3 text-sm text-gray-700 max-w-md whitespace-normal break-words">
+                                        {entry.particular || '-'}
+                                      </td>
+                                      <td className="px-4 py-3 text-sm text-right text-gray-900">
+                                        {entry.debitAmount > 0 ? formatCurrency(entry.debitAmount) : '0'}
+                                      </td>
+                                      <td className="px-4 py-3 text-sm text-right text-gray-900">
+                                        {entry.creditAmount > 0 ? formatCurrency(entry.creditAmount) : '0'}
+                                      </td>
+                                      <td className={`px-4 py-3 text-sm text-right font-semibold ${(entry.balance || 0) < 0 ? 'text-red-600' : 'text-gray-900'
+                                        }`}>
+                                        {formatCurrency(entry.balance || 0)}
+                                      </td>
+                                      <td className="px-4 py-3 text-center no-print">
+                                        {entry.referenceId && entry.source && ['purchase', 'Purchase Return', 'purchase_invoice', 'purchase_invoice_payment'].includes((entry.source || '').toString()) ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => handlePrintEntry(entry)}
+                                            disabled={printLoading}
+                                            className="inline-flex items-center justify-center p-1.5 rounded-md text-gray-600 hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50"
+                                            title={entry.source === 'Purchase Return' ? 'Print return' : 'Print purchase invoice'}
+                                          >
+                                            <Printer className="h-4 w-4" />
+                                          </button>
+                                        ) : null}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                                {padBottom > 0 ? (
+                                  <tr aria-hidden className="pointer-events-none">
+                                    <td colSpan={7} className="p-0 border-0" style={{ height: padBottom }} />
+                                  </tr>
+                                ) : null}
+                              </>
+                            );
+                          })()
+                        )}
+
+                        {/* Total Row */}
+                        {supplierEntries.length > 0 && (
+                          <tr className="bg-blue-200 font-semibold border-t-2 border-blue-300">
+                            <td className="px-4 py-3 text-sm text-gray-900"></td>
+                            <td className="px-4 py-3 text-sm text-gray-900"></td>
+                            <td className="px-4 py-3 text-sm text-gray-900">Total</td>
+                            <td className="px-4 py-3 text-sm text-right text-gray-900">
+                              {formatCurrency(sumDebits(supplierEntries))}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-right text-gray-900">
+                              {formatCurrency(sumCredits(supplierEntries))}
+                            </td>
+                            <td className={`px-4 py-3 text-sm text-right font-bold ${closingBalanceFromEntries(supplierDetail?.openingBalance ?? detailedSupplierTransactionsData?.data?.openingBalance ?? 0, supplierEntries, true) < 0 ? 'text-red-600' : 'text-gray-900'}`}>
+                              {formatCurrency(closingBalanceFromEntries(supplierDetail?.openingBalance ?? detailedSupplierTransactionsData?.data?.openingBalance ?? 0, supplierEntries, true))}
+                            </td>
+                            <td className="px-4 py-3 text-center no-print"></td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {selectedExpenseAccountCode && !selectedCustomerId && !selectedSupplierId && !selectedBankId && (
+              <div className="bg-white border border-amber-200 rounded-lg shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-amber-200 bg-amber-50">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-amber-200">
+                      <Wallet className="h-5 w-5 text-amber-800" />
+                    </div>
+                    <div>
+                      <h2 className="text-lg font-semibold text-gray-900">
+                        {expenseAccountDetail?.accountName || 'Expense account'} ({expenseAccountDetail?.accountCode || selectedExpenseAccountCode})
+                      </h2>
+                      {filters.startDate && filters.endDate && (
+                        <p className="text-xs text-gray-500 mt-1">
+                          {formatDate(filters.startDate)} – {formatDate(filters.endDate)}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  ref={expenseLedgerScrollRef}
+                  className={`overflow-x-auto ${virtualizeExpenseLedgerRows ? 'max-h-[min(70vh,560px)] overflow-y-auto' : ''}`}
+                >
+                  <table className="min-w-full account-ledger-table">
+                    <thead>
+                      <tr className="bg-amber-600 border-b border-amber-700">
+                        <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">Date</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">Voucher No</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">Particular</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-white uppercase tracking-wider">Debits</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-white uppercase tracking-wider">Credits</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-white uppercase tracking-wider">Balance</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200 bg-white">
+                      <tr className="bg-amber-50/50">
+                        <td colSpan="3" className="px-4 py-3 text-sm font-medium text-gray-900">Opening Balance:</td>
+                        <td className="px-4 py-3 text-sm text-right text-gray-900">0</td>
+                        <td className="px-4 py-3 text-sm text-right text-gray-900">0</td>
+                        <td className={`px-4 py-3 text-sm text-right font-bold ${(expenseAccountDetail?.openingBalance ?? 0) < 0 ? 'text-red-600' : 'text-gray-900'}`}>
+                          {formatCurrency(expenseAccountDetail?.openingBalance ?? 0)}
+                        </td>
+                      </tr>
+                      {expenseLedgerEntries.length === 0 ? (
+                        <tr>
+                          <td colSpan="6" className="px-4 py-8 text-center text-gray-500">
+                            <FileText className="h-8 w-8 mx-auto mb-2 text-gray-400" />
+                            <p>No transactions for this expense account in the selected period</p>
+                          </td>
+                        </tr>
+                      ) : !virtualizeExpenseLedgerRows ? (
+                        expenseLedgerEntries.map((entry, index) => (
+                          <tr key={index} className="hover:bg-gray-50 transition-colors">
+                            <td className="px-4 py-3 text-sm text-gray-900">{formatDate(entry.date)}</td>
+                            <td className="px-4 py-3 text-sm text-gray-900">{entry.voucherNo || '-'}</td>
+                            <td className="px-4 py-3 text-sm text-gray-700 max-w-md whitespace-normal break-words">{entry.particular || '-'}</td>
+                            <td className="px-4 py-3 text-sm text-right text-gray-900">{entry.debitAmount > 0 ? formatCurrency(entry.debitAmount) : '0'}</td>
+                            <td className="px-4 py-3 text-sm text-right text-gray-900">{entry.creditAmount > 0 ? formatCurrency(entry.creditAmount) : '0'}</td>
+                            <td className={`px-4 py-3 text-sm text-right font-semibold ${(entry.balance || 0) < 0 ? 'text-red-600' : 'text-gray-900'}`}>
+                              {formatCurrency(entry.balance || 0)}
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        (() => {
+                          const vItems = expenseLedgerVirtualizer.getVirtualItems();
+                          const totalH = expenseLedgerVirtualizer.getTotalSize();
+                          const { padTop, padBottom } = getVirtualTablePadding(vItems, totalH);
+                          return (
+                            <>
+                              {padTop > 0 ? (
+                                <tr aria-hidden className="pointer-events-none">
+                                  <td colSpan={6} className="p-0 border-0" style={{ height: padTop }} />
+                                </tr>
+                              ) : null}
+                              {vItems.map((vr) => {
+                                const entry = expenseLedgerEntries[vr.index];
+                                return (
+                                  <tr key={vr.key} className="hover:bg-gray-50 transition-colors" style={{ height: vr.size }}>
+                                    <td className="px-4 py-3 text-sm text-gray-900">{formatDate(entry.date)}</td>
+                                    <td className="px-4 py-3 text-sm text-gray-900">{entry.voucherNo || '-'}</td>
+                                    <td className="px-4 py-3 text-sm text-gray-700 max-w-md whitespace-normal break-words">{entry.particular || '-'}</td>
+                                    <td className="px-4 py-3 text-sm text-right text-gray-900">{entry.debitAmount > 0 ? formatCurrency(entry.debitAmount) : '0'}</td>
+                                    <td className="px-4 py-3 text-sm text-right text-gray-900">{entry.creditAmount > 0 ? formatCurrency(entry.creditAmount) : '0'}</td>
+                                    <td className={`px-4 py-3 text-sm text-right font-semibold ${(entry.balance || 0) < 0 ? 'text-red-600' : 'text-gray-900'}`}>
+                                      {formatCurrency(entry.balance || 0)}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                              {padBottom > 0 ? (
+                                <tr aria-hidden className="pointer-events-none">
+                                  <td colSpan={6} className="p-0 border-0" style={{ height: padBottom }} />
+                                </tr>
+                              ) : null}
+                            </>
+                          );
+                        })()
+                      )}
+                      {expenseLedgerEntries.length > 0 && (
+                        <tr className="bg-amber-100 font-semibold border-t-2 border-amber-200">
+                          <td className="px-4 py-3 text-sm text-gray-900"></td>
+                          <td className="px-4 py-3 text-sm text-gray-900"></td>
+                          <td className="px-4 py-3 text-sm text-gray-900">Period total</td>
+                          <td className="px-4 py-3 text-sm text-right text-gray-900">{formatCurrency(sumDebits(expenseLedgerEntries))}</td>
+                          <td className="px-4 py-3 text-sm text-right text-gray-900">{formatCurrency(sumCredits(expenseLedgerEntries))}</td>
+                          <td className={`px-4 py-3 text-sm text-right font-bold ${(expenseAccountDetail?.closingBalance ?? 0) < 0 ? 'text-red-600' : 'text-gray-900'}`}>
+                            {formatCurrency(expenseAccountDetail?.closingBalance ?? 0)}
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {(selectedBankId || selectedBankId === ALL_BANKS_VALUE) && !selectedCustomerId && !selectedSupplierId && !selectedExpenseAccountCode && (
+              <div className="bg-white border border-indigo-200 rounded-lg shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-indigo-200 bg-indigo-50">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-indigo-200">
+                      <Building2 className="h-5 w-5 text-indigo-700" />
+                    </div>
+                    <div>
+                      <h2 className="text-lg font-semibold text-gray-900">
+                        {selectedBankId === ALL_BANKS_VALUE ? 'All Banks Ledger' : (selectedBank?.bankName || 'Bank Ledger')}
+                      </h2>
+                      {filters.startDate && filters.endDate && (
+                        <p className="text-xs text-gray-500 mt-1">
+                          {formatDate(filters.startDate)} – {formatDate(filters.endDate)}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  ref={bankLedgerScrollRef}
+                  className={`overflow-x-auto ${virtualizeBankLedgerRows ? 'max-h-[min(70vh,560px)] overflow-y-auto' : ''}`}
+                >
+                  <table className="min-w-full account-ledger-table">
+                    <thead>
+                      <tr className="bg-indigo-600 border-b border-indigo-700">
+                        <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">Date</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">Voucher No</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">Bank Name</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">Particular</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-white uppercase tracking-wider">Debits</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-white uppercase tracking-wider">Credits</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-white uppercase tracking-wider">Balance</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {/* Opening Balance Row */}
+                      {(selectedBank || selectedBankId === ALL_BANKS_VALUE) && (
+                        <tr className="bg-indigo-50/50 font-medium">
+                          <td className="px-4 py-3 text-sm text-gray-900 border-b border-gray-100">
+                            {filters.startDate ? formatDate(filters.startDate) : '-'}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-900 border-b border-gray-100">-</td>
+                          <td className="px-4 py-3 text-sm text-gray-900 border-b border-gray-100">
+                            {selectedBankId === ALL_BANKS_VALUE ? 'All Banks' : selectedBank?.bankName}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-900 border-b border-gray-100">OB: Opening Balance</td>
+                          <td className="px-4 py-3 text-sm text-right text-gray-900 border-b border-gray-100">
+                            {(selectedBankId === ALL_BANKS_VALUE ? bankTotals.openingBalance : (banksSummary.find(b => String(b.id) === String(selectedBankId))?.openingBalance || selectedBank?.openingBalance || selectedBank?.opening_balance || 0)) > 0
+                              ? formatCurrency(selectedBankId === ALL_BANKS_VALUE ? bankTotals.openingBalance : (banksSummary.find(b => String(b.id) === String(selectedBankId))?.openingBalance || selectedBank?.openingBalance || selectedBank?.opening_balance || 0))
+                              : '0.00'}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-right text-gray-900 border-b border-gray-100">
+                            {(selectedBankId === ALL_BANKS_VALUE ? bankTotals.openingBalance : (banksSummary.find(b => String(b.id) === String(selectedBankId))?.openingBalance || selectedBank?.openingBalance || selectedBank?.opening_balance || 0)) < 0
+                              ? formatCurrency(Math.abs(selectedBankId === ALL_BANKS_VALUE ? bankTotals.openingBalance : (banksSummary.find(b => String(b.id) === String(selectedBankId))?.openingBalance || selectedBank?.openingBalance || selectedBank?.opening_balance || 0)))
+                              : '0.00'}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-right text-gray-900 border-b border-gray-100 font-bold">
+                            {formatCurrency(selectedBankId === ALL_BANKS_VALUE ? bankTotals.openingBalance : (banksSummary.find(b => String(b.id) === String(selectedBankId))?.openingBalance || selectedBank?.openingBalance || selectedBank?.opening_balance || 0))}
+                          </td>
+                        </tr>
+                      )}
+
+                      {bankLedgerRows.length === 0 ? (
+                        <tr>
+                          <td colSpan="7" className="px-4 py-8 text-center text-gray-500 border-b border-gray-100">
+                            {!selectedBankId ? 'Please select a bank to view ledger entries.' : 'No bank ledger entries found for this period.'}
+                          </td>
+                        </tr>
+                      ) : !virtualizeBankLedgerRows ? (
+                        bankLedgerRows.map((entry, index) => (
+                          <tr key={`${entry.voucherNo}-${entry.date}-${index}`} className="hover:bg-gray-50 transition-colors">
+                            <td className="px-4 py-3 text-sm text-gray-900 border-b border-gray-100">{formatDate(entry.date)}</td>
+                            <td className="px-4 py-3 text-sm text-gray-900 border-b border-gray-100">{entry.voucherNo}</td>
+                            <td className="px-4 py-3 text-sm text-gray-900 border-b border-gray-100">{entry.bankName}</td>
+                            <td className="px-4 py-3 text-sm text-gray-900 border-b border-gray-100">{entry.particular}</td>
+                            <td className="px-4 py-3 text-sm text-right text-gray-900 border-b border-gray-100">{formatCurrency(entry.debitAmount)}</td>
+                            <td className="px-4 py-3 text-sm text-right text-gray-900 border-b border-gray-100">{formatCurrency(entry.creditAmount)}</td>
+                            <td className="px-4 py-3 text-sm text-right font-bold text-gray-900 border-b border-gray-100">{formatCurrency(entry.balance)}</td>
+                          </tr>
+                        ))
+                      ) : (
+                        (() => {
+                          const vItems = bankLedgerVirtualizer.getVirtualItems();
+                          const totalH = bankLedgerVirtualizer.getTotalSize();
+                          const { padTop, padBottom } = getVirtualTablePadding(vItems, totalH);
+                          return (
+                            <>
+                              {padTop > 0 ? (
+                                <tr aria-hidden className="pointer-events-none">
+                                  <td colSpan={7} className="p-0 border-0" style={{ height: padTop }} />
+                                </tr>
+                              ) : null}
+                              {vItems.map((vr) => {
+                                const entry = bankLedgerRows[vr.index];
+                                return (
+                                  <tr key={vr.key} className="hover:bg-gray-50 transition-colors" style={{ height: vr.size }}>
+                                    <td className="px-4 py-3 text-sm text-gray-900 border-b border-gray-100">{formatDate(entry.date)}</td>
+                                    <td className="px-4 py-3 text-sm text-gray-900 border-b border-gray-100">{entry.voucherNo}</td>
+                                    <td className="px-4 py-3 text-sm text-gray-900 border-b border-gray-100">{entry.bankName}</td>
+                                    <td className="px-4 py-3 text-sm text-gray-900 border-b border-gray-100">{entry.particular}</td>
+                                    <td className="px-4 py-3 text-sm text-right text-gray-900 border-b border-gray-100">{formatCurrency(entry.debitAmount)}</td>
+                                    <td className="px-4 py-3 text-sm text-right text-gray-900 border-b border-gray-100">{formatCurrency(entry.creditAmount)}</td>
+                                    <td className="px-4 py-3 text-sm text-right font-bold text-gray-900 border-b border-gray-100">{formatCurrency(entry.balance)}</td>
+                                  </tr>
+                                );
+                              })}
+                              {padBottom > 0 ? (
+                                <tr aria-hidden className="pointer-events-none">
+                                  <td colSpan={7} className="p-0 border-0" style={{ height: padBottom }} />
+                                </tr>
+                              ) : null}
+                            </>
+                          );
+                        })()
+                      )}
+                      {/* Total Row for Bank Ledger */}
+                      {bankLedgerRows.length > 0 && (
+                        <tr className="bg-indigo-100 font-semibold border-t-2 border-indigo-200">
+                          <td className="px-4 py-3 text-sm text-gray-900"></td>
+                          <td className="px-4 py-3 text-sm text-gray-900"></td>
+                          <td className="px-4 py-3 text-sm text-gray-900"></td>
+                          <td className="px-4 py-3 text-sm text-gray-900 text-right">Totals / Net Change</td>
+                          <td className="px-4 py-3 text-sm text-right text-gray-900">
+                            {formatCurrency(bankLedgerRows.reduce((sum, r) => sum + (r.debitAmount || 0), 0))}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-right text-gray-900">
+                            {formatCurrency(bankLedgerRows.reduce((sum, r) => sum + (r.creditAmount || 0), 0))}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-right text-gray-900"></td>
+                        </tr>
+                      )}
+                      {(selectedBank || selectedBankId === ALL_BANKS_VALUE) && (
+                        <tr className="bg-indigo-200 font-bold border-t-2 border-indigo-300">
+                          <td colSpan="6" className="px-4 py-3 text-right text-sm text-gray-900 uppercase tracking-wider">Final Closing Balance</td>
+                          <td
+                            className={`px-4 py-3 text-right text-lg ${
+                              bankLedgerFinalClosingBalance < 0 ? 'text-red-700' : 'text-indigo-800'
+                            }`}
+                          >
+                            {formatCurrency(bankLedgerFinalClosingBalance)}
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {!selectedCustomerId && !selectedSupplierId && !selectedBankId && !selectedExpenseAccountCode && (
+              <div className="bg-white border border-gray-200 rounded-lg shadow-sm p-6 space-y-6">
+                <div className="text-center py-6 px-4 border-b border-gray-100">
+                  <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-gray-100 mb-4">
+                    <FileText className="h-7 w-7 text-gray-400" />
+                  </div>
+                  <h3 className="text-base font-medium text-gray-900 mb-1">No party ledger selected</h3>
+                  <p className="text-sm text-gray-500 max-w-md mx-auto">
+                    Select a customer, supplier, bank, or expense account above to view detailed ledger lines.
+                  </p>
+                </div>
+                {expenseSummaries.length === 0 && (
+                  <div className="rounded-lg border border-amber-100 bg-amber-50/80 px-4 py-3 text-sm text-amber-950">
+                    <p className="font-medium text-amber-900">No expense postings in this date range</p>
+                    <p className="mt-1 text-amber-900/90">
+                      Try widening the start and end dates, or choose an <strong>Expense account</strong> from the list—the summary table only shows accounts that had activity in the selected period, but you can still open any expense GL account to see opening balance and lines.
+                    </p>
+                  </div>
+                )}
+                {expenseSummaries.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-semibold text-gray-800 mb-3 flex items-center gap-2">
+                      <Wallet className="h-4 w-4 text-amber-600" />
+                      Expense accounts (period summary)
+                    </h4>
+                    <div className="overflow-x-auto border border-gray-200 rounded-lg">
+                      <table className="min-w-full text-sm">
+                        <thead>
+                          <tr className="bg-amber-50 border-b border-amber-100">
+                            <th className="text-left px-3 py-2 font-medium text-gray-700">Code</th>
+                            <th className="text-left px-3 py-2 font-medium text-gray-700">Account</th>
+                            <th className="text-right px-3 py-2 font-medium text-gray-700">Debits</th>
+                            <th className="text-right px-3 py-2 font-medium text-gray-700">Credits</th>
+                            <th className="text-right px-3 py-2 font-medium text-gray-700">Net</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {expenseSummaries.map((row) => (
+                            <tr key={row.accountCode} className="hover:bg-gray-50">
+                              <td className="px-3 py-2 font-mono text-gray-800">{row.accountCode}</td>
+                              <td className="px-3 py-2 text-gray-900">{row.accountName || '—'}</td>
+                              <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(row.totalDebits)}</td>
+                              <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(row.totalCredits)}</td>
+                              <td className="px-3 py-2 text-right font-medium tabular-nums">{formatCurrency(row.netExpense)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr className="bg-amber-50/80 font-semibold border-t border-amber-100">
+                            <td colSpan={2} className="px-3 py-2 text-gray-800">Total</td>
+                            <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(expenseTotals.totalDebits)}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(expenseTotals.totalCredits)}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(expenseTotals.netExpense)}</td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-2">Choose an expense account in filters to open the full transaction list.</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Print Modal for invoices (Sale, Purchase) */}
+        <PrintModal
+          isOpen={showPrintModal}
+          onClose={() => {
+            setShowPrintModal(false);
+            setPrintData(null);
+          }}
+          orderData={printData}
+          documentTitle={printDocumentTitle}
+          partyLabel={printPartyLabel}
+        />
+
+        {/* Receipt / Payment print modal – for Cash Receipt, Bank Receipt */}
+        <ReceiptPaymentPrintModal
+          isOpen={showReceiptPrintModal}
+          onClose={() => {
+            setShowReceiptPrintModal(false);
+            setReceiptPrintData(null);
+          }}
+          documentTitle={receiptPrintTitle}
+          receiptData={receiptPrintData}
+        />
+
+        {/* Return print modal – for Sale Return, Purchase Return */}
+        <BasePrintModal
+          isOpen={showReturnPrintModal}
+          onClose={() => {
+            setShowReturnPrintModal(false);
+            setReturnPrintData(null);
+          }}
+          documentTitle={returnPrintData?.origin === 'purchase' ? 'Purchase Return' : 'Sale Return'}
+          hasData={!!returnPrintData}
+          emptyMessage="No return data to print."
+        >
+          <ReturnPrintContent
+            returnData={returnPrintData}
+            companyInfo={companyInfo}
+            partyLabel={returnPrintData?.origin === 'purchase' ? 'Supplier' : 'Customer'}
+          />
+        </BasePrintModal>
+
+        {/* Hidden Print Section - customer (emerald), supplier (blue), expense (amber) */}
+        <div
+          className={`hidden print:block account-ledger-print ${selectedExpenseAccountCode ? 'account-ledger-print--expense' : selectedCustomerId ? 'account-ledger-print--customer' : 'account-ledger-print--supplier'}`}
+          ref={printRef}
+        >
+          <div className="print-header text-center mb-4">
+            <h1 className="text-xl font-bold uppercase underline">Account Ledger Summary</h1>
+            <p className="font-bold">{printPartyHeader.line1}</p>
+            {printPartyHeader.line2 ? <p className="font-semibold">{printPartyHeader.line2}</p> : null}
+            <p>Period: {formatDate(filters.startDate)} to {formatDate(filters.endDate)}</p>
+          </div>
+
+          <table className="account-ledger-print-table" style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', border: '1px solid #000', fontSize: '10px' }}>
+            <thead>
+              <tr className="account-ledger-print-thead">
+                <th style={{ width: '4%', border: '1px solid #000', padding: '6px 2px', textAlign: 'center' }}>S.NO</th>
+                <th style={{ width: '8%', border: '1px solid #000', padding: '6px 2px', textAlign: 'center' }}>DATE</th>
+                <th style={{ width: printShowReturnCol ? '52%' : '60%', border: '1px solid #000', padding: '6px 2px', textAlign: 'left' }}>DESCRIPTION</th>
+                {printShowReturnCol && (
+                  <th style={{ width: '8%', border: '1px solid #000', padding: '6px 2px', textAlign: 'center' }}>RETURN</th>
+                )}
+                <th className="print-amount" style={{ width: '8%', border: '1px solid #000', padding: '6px 2px', textAlign: 'right' }}>DEBITS</th>
+                <th className="print-amount" style={{ width: '8%', border: '1px solid #000', padding: '6px 2px', textAlign: 'right' }}>CREDITS</th>
+                <th className="print-amount" style={{ width: '8%', border: '1px solid #000', padding: '6px 2px', textAlign: 'right' }}>BALANCE</th>
+              </tr>
+            </thead>
+            <tbody>
+              {/* Opening Balance */}
+              <tr className="account-ledger-print-opening">
+                <td style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'center' }}>-</td>
+                <td style={{ border: '1px solid #000', padding: '6px 2px' }}></td>
+                <td style={{ border: '1px solid #000', padding: '6px 2px', fontWeight: 'bold', fontSize: '11px' }}>Opening Balance</td>
+                {printShowReturnCol && (
+                  <td style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'center' }}></td>
+                )}
+                <td className="print-amount" style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'right' }}>0</td>
+                <td className="print-amount" style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'right' }}>0</td>
+                <td className="print-amount" style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'right', fontWeight: 'bold' }}>
+                  {formatCurrency(printOpeningBal)}
+                </td>
+              </tr>
+
+              {/* Transaction Rows */}
+              {printLedgerRows?.map((entry, index) => (
+                <tr key={index}>
+                  <td style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'center' }}>{index + 1}</td>
+                  <td style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'center' }}>{formatDate(entry.date)}</td>
+                  <td style={{ border: '1px solid #000', padding: '6px 2px', fontSize: '12px' }}>
+                    <span className="font-medium">{entry.particular || '-'}</span>
+                    {entry.voucherNo && entry.voucherNo !== '-' && (
+                      <span className="ml-1">
+                        {entry.particular && entry.particular.toLowerCase().includes('sale') ? '#' : ''}:{entry.voucherNo}
+                      </span>
+                    )}
+                  </td>
+                  {printShowReturnCol && (
+                    <td style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'center' }}>
+                      {selectedCustomerId && entry.source === 'Sale Return' ? 'Return' : ''}
+                    </td>
+                  )}
+                  <td className="print-amount" style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'right' }}>
+                    {entry.debitAmount > 0 ? formatCurrency(entry.debitAmount) : '0'}
+                  </td>
+                  <td className="print-amount" style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'right' }}>
+                    {entry.creditAmount > 0 ? formatCurrency(entry.creditAmount) : '0'}
+                  </td>
+                  <td className="print-amount" style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'right' }}>
+                    {formatCurrency(entry.balance || 0)}
+                  </td>
+                </tr>
+              ))}
+
+              {/* Return Total Row - customer only, when there are returns and return column visible */}
+              {printShowReturnCol && selectedCustomerId && (customerDetail?.returnTotal ?? detailedTransactionsData?.data?.returnTotal ?? 0) > 0 && (
+                <tr className="account-ledger-print-subtotal">
+                  <td style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'center' }}></td>
+                  <td style={{ border: '1px solid #000', padding: '6px 2px' }}></td>
+                  <td style={{ border: '1px solid #000', padding: '6px 2px', fontWeight: '600' }}>Return Total</td>
+                  <td style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'center', fontWeight: '600' }}>Return</td>
+                  <td className="print-amount" style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'right' }}>0</td>
+                  <td className="print-amount" style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'right' }}>
+                    {formatCurrency(customerDetail?.returnTotal ?? detailedTransactionsData?.data?.returnTotal ?? 0)}
+                  </td>
+                  <td className="print-amount" style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'right' }}></td>
+                </tr>
+              )}
+
+              {/* Total Row */}
+              <tr className="account-ledger-print-total">
+                <td colSpan={printShowReturnCol ? 4 : 3} style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'center', fontSize: '15px' }}>Total</td>
+                <td className="print-amount" style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'right', fontSize: '15px', fontWeight: 'bold' }}>
+                  {formatCurrency(sumDebits(printLedgerRows))}
+                </td>
+                <td className="print-amount" style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'right', fontSize: '15px', fontWeight: 'bold' }}>
+                  {formatCurrency(sumCredits(printLedgerRows))}
+                </td>
+                <td className="print-amount" style={{ border: '1px solid #000', padding: '6px 2px', textAlign: 'right', fontSize: '15px', fontWeight: 'bold' }}>
+                  {formatCurrency(
+                    selectedExpenseAccountCode
+                      ? (expenseAccountDetail?.closingBalance ?? 0)
+                      : selectedCustomerId
+                        ? closingBalanceFromEntries(customerDetail?.openingBalance ?? detailedTransactionsData?.data?.openingBalance ?? 0, customerDetail?.entries ?? detailedTransactionsData?.data?.entries, false)
+                        : closingBalanceFromEntries(supplierDetail?.openingBalance ?? detailedSupplierTransactionsData?.data?.openingBalance ?? 0, supplierDetail?.entries ?? detailedSupplierTransactionsData?.data?.entries, true)
+                  )}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+    </PageShell>
+  );
+};
+
+export default AccountLedgerSummary;
