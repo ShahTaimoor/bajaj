@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   RefreshCw,
   Tag,
+  Tags,
   Camera,
   Printer,
   Download,
@@ -312,7 +313,7 @@ export const Products = () => {
             onClick={() => productOps.handleAdd()}
             variant="default"
             size="default"
-            className="flex items-center justify-center gap-2 bg-zinc-900 hover:bg-zinc-800 text-white transition-all shadow-md active:scale-95 px-6 font-bold tracking-tight"
+            className="hidden md:flex items-center justify-center gap-2 bg-zinc-900 hover:bg-zinc-800 text-white transition-all shadow-md active:scale-95 px-6 font-bold tracking-tight"
           >
             <Plus className="h-4 w-4" />
             <span className="hidden sm:inline uppercase">ADD PRODUCT</span>
@@ -342,6 +343,36 @@ export const Products = () => {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuItem
+                className="md:hidden"
+                onSelect={(e) => {
+                  e.preventDefault();
+                  productOps.handleAdd();
+                }}
+              >
+                <Plus className="h-4 w-4 mr-2 text-zinc-700" />
+                Add Product
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="md:hidden"
+                onSelect={(e) => {
+                  e.preventDefault();
+                  const componentInfo = getComponentInfo('/categories');
+                  if (componentInfo) {
+                    openTab({
+                      title: 'Categories',
+                      path: '/categories',
+                      component: componentInfo.component,
+                      icon: componentInfo.icon,
+                      allowMultiple: true,
+                    });
+                  }
+                }}
+              >
+                <Tags className="h-4 w-4 mr-2 text-indigo-600" />
+                Categories
+              </DropdownMenuItem>
+              <DropdownMenuSeparator className="md:hidden" />
               <DropdownMenuItem
                 onSelect={(e) => {
                   e.preventDefault();
