@@ -144,6 +144,14 @@ export const Products = () => {
 
   const productOps = useProductOperations(allProducts, refetch);
 
+  /** Close other overlays first so stacked modals (e.g. label printer z-100) do not cover Add Product (z-50). */
+  const openAddProductModal = () => {
+    setShowLabelPrinter(false);
+    setShowBarcodeGenerator(false);
+    setShowBarcodeScanner(false);
+    productOps.handleAdd();
+  };
+
   const refreshCategories = () => {
     dispatch(api.util.invalidateTags([{ type: 'Categories', id: 'LIST' }]));
     toast.success('Categories refreshed');
@@ -310,7 +318,7 @@ export const Products = () => {
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-end gap-2 sm:gap-3 overflow-x-auto">
           <Button
-            onClick={() => productOps.handleAdd()}
+            onClick={openAddProductModal}
             variant="default"
             size="default"
             className="hidden md:flex items-center justify-center gap-2 bg-zinc-900 hover:bg-zinc-800 text-white transition-all shadow-md active:scale-95 px-6 font-bold tracking-tight"
@@ -342,12 +350,15 @@ export const Products = () => {
                 <span className="font-semibold">More</span>
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuContent
+              align="end"
+              className="w-56"
+              onCloseAutoFocus={(e) => e.preventDefault()}
+            >
               <DropdownMenuItem
                 className="md:hidden"
-                onSelect={(e) => {
-                  e.preventDefault();
-                  productOps.handleAdd();
+                onSelect={() => {
+                  openAddProductModal();
                 }}
               >
                 <Plus className="h-4 w-4 mr-2 text-zinc-700" />
@@ -355,8 +366,7 @@ export const Products = () => {
               </DropdownMenuItem>
               <DropdownMenuItem
                 className="md:hidden"
-                onSelect={(e) => {
-                  e.preventDefault();
+                onSelect={() => {
                   const componentInfo = getComponentInfo('/categories');
                   if (componentInfo) {
                     openTab({
@@ -374,8 +384,7 @@ export const Products = () => {
               </DropdownMenuItem>
               <DropdownMenuSeparator className="md:hidden" />
               <DropdownMenuItem
-                onSelect={(e) => {
-                  e.preventDefault();
+                onSelect={() => {
                   const componentInfo = getComponentInfo('/categories');
                   if (componentInfo) {
                     openTab({
@@ -392,20 +401,20 @@ export const Products = () => {
                 <Tag className="h-4 w-4 mr-2 text-indigo-600" />
                 Add Category
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={(e) => { e.preventDefault(); refreshCategories(); }}>
+              <DropdownMenuItem onSelect={() => refreshCategories()}>
                 <RefreshCw className="h-4 w-4 mr-2 text-teal-600" />
                 Refresh Categories
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={(e) => { e.preventDefault(); setShowBarcodeScanner(true); }}>
+              <DropdownMenuItem onSelect={() => setShowBarcodeScanner(true)}>
                 <Camera className="h-4 w-4 mr-2 text-amber-600" />
                 Scan Barcode
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={(e) => { e.preventDefault(); setShowLabelPrinter(true); }}>
+              <DropdownMenuItem onSelect={() => setShowLabelPrinter(true)}>
                 <Printer className="h-4 w-4 mr-2 text-purple-600" />
                 Print Barcode Labels
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={(e) => { e.preventDefault(); handleDownloadTemplate(); }}>
+              <DropdownMenuItem onSelect={() => handleDownloadTemplate()}>
                 <Download className="h-4 w-4 mr-2 text-orange-600" />
                 Download Template
               </DropdownMenuItem>
