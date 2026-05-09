@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/button';
  *   - children: ReactNode - Modal content
  *   - maxWidth: 'sm'|'md'|'lg'|'xl'|'full' - Max width of content area (default: 'xl')
  *   - variant: 'centered'|'scrollable' - Layout style (default: 'scrollable')
- *     - centered: flex items-center justify-center, fixed height
+ *     - centered: vertically centered card with max viewport height; body scrolls inside the card
  *     - scrollable: overflow-y-auto, content scrolls within viewport
  *   - showCloseButton: boolean - Show X in header (default: true when title present)
  *   - closeOnBackdrop: boolean - Close when backdrop clicked (default: true)
@@ -102,8 +102,12 @@ const BaseModal = ({
     >
       <div className={`${wrapperClasses} flex ${variant === 'centered' ? 'items-center justify-center min-h-full' : 'pt-20'} relative w-full min-w-0`}>
         <div
-          className={`relative mx-auto ${widthClasses} ${maxWidthClasses[maxWidth]} shadow-lg rounded-md bg-white flex flex-col ${
-            variant === 'scrollable' ? 'max-h-[90vh]' : ''
+          className={`relative mx-auto ${widthClasses} ${maxWidthClasses[maxWidth]} shadow-lg rounded-md bg-white flex flex-col min-h-0 ${
+            variant === 'scrollable'
+              ? 'max-h-[90vh]'
+              : variant === 'centered'
+                ? 'max-h-[min(92dvh,calc(100dvh-2rem))]'
+                : ''
           } ${className}`}
           onClick={(e) => e.stopPropagation()}
         >
@@ -136,7 +140,9 @@ const BaseModal = ({
           )}
 
           <div
-            className={`flex-1 ${variant === 'scrollable' ? 'overflow-y-auto' : ''} ${contentClassName}`}
+            className={`flex-1 min-h-0 ${
+              variant === 'scrollable' || variant === 'centered' ? 'overflow-y-auto overscroll-contain' : ''
+            } ${contentClassName}`}
           >
             {children}
           </div>
