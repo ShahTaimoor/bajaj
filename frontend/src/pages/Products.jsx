@@ -1,15 +1,17 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Plus,
   Search,
   AlertTriangle,
   RefreshCw,
   Tag,
-  Tags,
   Camera,
   Printer,
   Download,
   MoreHorizontal,
+  FileSpreadsheet,
+  FileText,
+  FileUp,
 } from 'lucide-react';
 import {
   useGetProductsQuery,
@@ -30,6 +32,7 @@ import { DeleteConfirmationDialog } from '../components/ConfirmationDialog';
 import { useDeleteConfirmation } from '../hooks/useConfirmation';
 
 import ProductFilters from '../components/ProductFilters';
+import { PageHeader } from '../components/layout/PageHeader';
 import { useTab } from '../contexts/TabContext';
 import { useBulkOperations } from '../hooks/useBulkOperations';
 import BulkOperationsBar from '../components/BulkOperationsBar';
@@ -86,6 +89,9 @@ export const Products = () => {
   const [showNotes, setShowNotes] = useState(false);
   const [notesEntity, setNotesEntity] = useState(null);
   const { openTab } = useTab();
+  const excelExportRef = useRef(null);
+  const pdfExportRef = useRef(null);
+  const excelImportRef = useRef(null);
 
   const debouncedSearch = useDebouncedValue(searchTerm, 350);
 
@@ -143,14 +149,6 @@ export const Products = () => {
   const { confirmation, confirmDelete, handleConfirm, handleCancel } = useDeleteConfirmation();
 
   const productOps = useProductOperations(allProducts, refetch);
-
-  /** Close other overlays first so stacked modals (e.g. label printer z-100) do not cover Add Product (z-50). */
-  const openAddProductModal = () => {
-    setShowLabelPrinter(false);
-    setShowBarcodeGenerator(false);
-    setShowBarcodeScanner(false);
-    productOps.handleAdd();
-  };
 
   const refreshCategories = () => {
     dispatch(api.util.invalidateTags([{ type: 'Categories', id: 'LIST' }]));
@@ -310,34 +308,37 @@ export const Products = () => {
 
   return (
     <div className="space-y-4 sm:space-y-6 w-full max-w-full min-w-0">
-      <div className="flex items-center justify-between gap-2 min-w-0">
-        <div className="min-w-0 pr-2">
-          <h1 className="text-lg sm:text-3xl font-bold text-gray-900 truncate">Products</h1>
-          <p className="hidden sm:block text-sm sm:text-base text-gray-600 mt-1">Manage your product catalog</p>
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center justify-end gap-2 sm:gap-3 overflow-x-auto">
+      <PageHeader
+        title="Products"
+        subtitle="Manage your product catalog"
+        actions={<>
           <Button
-            onClick={openAddProductModal}
+            onClick={() => productOps.handleAdd()}
             variant="default"
             size="default"
-            className="hidden md:flex items-center justify-center gap-2 bg-zinc-900 hover:bg-zinc-800 text-white transition-all shadow-md active:scale-95 px-6 font-bold tracking-tight"
+            className="flex items-center justify-center gap-2 bg-zinc-900 hover:bg-zinc-800 text-white transition-all shadow-md active:scale-95 px-6 font-bold tracking-tight"
           >
             <Plus className="h-4 w-4" />
             <span className="hidden sm:inline uppercase">ADD PRODUCT</span>
             <span className="sm:hidden uppercase">ADD</span>
           </Button>
           <ExcelExportButton
+            ref={excelExportRef}
             getData={getExportData}
             label="Export"
+            className="hidden sm:flex"
           />
           <PdfExportButton
+            ref={pdfExportRef}
             getData={getExportData}
             label="PDF"
+            className="hidden sm:flex"
           />
           <ExcelImportButton
+            ref={excelImportRef}
             onDataImported={handleImportData}
             label="Import"
+            className="hidden sm:flex"
           />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -350,41 +351,32 @@ export const Products = () => {
                 <span className="font-semibold">More</span>
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="end"
-              className="w-56"
-              onCloseAutoFocus={(e) => e.preventDefault()}
-            >
-              <DropdownMenuItem
-                className="md:hidden"
-                onSelect={() => {
-                  openAddProductModal();
-                }}
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuItem 
+                onSelect={(e) => { e.preventDefault(); excelExportRef.current?.handleExport(); }}
+                className="sm:hidden"
               >
-                <Plus className="h-4 w-4 mr-2 text-zinc-700" />
-                Add Product
+                <FileSpreadsheet className="h-4 w-4 mr-2 text-green-600" />
+                Export to Excel
               </DropdownMenuItem>
-              <DropdownMenuItem
-                className="md:hidden"
-                onSelect={() => {
-                  const componentInfo = getComponentInfo('/categories');
-                  if (componentInfo) {
-                    openTab({
-                      title: 'Categories',
-                      path: '/categories',
-                      component: componentInfo.component,
-                      icon: componentInfo.icon,
-                      allowMultiple: true,
-                    });
-                  }
-                }}
+              <DropdownMenuItem 
+                onSelect={(e) => { e.preventDefault(); pdfExportRef.current?.handleExport(); }}
+                className="sm:hidden"
               >
-                <Tags className="h-4 w-4 mr-2 text-indigo-600" />
-                Categories
+                <FileText className="h-4 w-4 mr-2 text-red-600" />
+                Export to PDF
               </DropdownMenuItem>
-              <DropdownMenuSeparator className="md:hidden" />
+              <DropdownMenuItem 
+                onSelect={(e) => { e.preventDefault(); excelImportRef.current?.handleButtonClick(); }}
+                className="sm:hidden"
+              >
+                <FileUp className="h-4 w-4 mr-2 text-blue-600" />
+                Import from Excel
+              </DropdownMenuItem>
+              <DropdownMenuSeparator className="sm:hidden" />
               <DropdownMenuItem
-                onSelect={() => {
+                onSelect={(e) => {
+                  e.preventDefault();
                   const componentInfo = getComponentInfo('/categories');
                   if (componentInfo) {
                     openTab({
@@ -401,20 +393,20 @@ export const Products = () => {
                 <Tag className="h-4 w-4 mr-2 text-indigo-600" />
                 Add Category
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => refreshCategories()}>
+              <DropdownMenuItem onSelect={(e) => { e.preventDefault(); refreshCategories(); }}>
                 <RefreshCw className="h-4 w-4 mr-2 text-teal-600" />
                 Refresh Categories
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => setShowBarcodeScanner(true)}>
+              <DropdownMenuItem onSelect={(e) => { e.preventDefault(); setShowBarcodeScanner(true); }}>
                 <Camera className="h-4 w-4 mr-2 text-amber-600" />
                 Scan Barcode
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => setShowLabelPrinter(true)}>
+              <DropdownMenuItem onSelect={(e) => { e.preventDefault(); setShowLabelPrinter(true); }}>
                 <Printer className="h-4 w-4 mr-2 text-purple-600" />
                 Print Barcode Labels
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={() => handleDownloadTemplate()}>
+              <DropdownMenuItem onSelect={(e) => { e.preventDefault(); handleDownloadTemplate(); }}>
                 <Download className="h-4 w-4 mr-2 text-orange-600" />
                 Download Template
               </DropdownMenuItem>
@@ -432,9 +424,8 @@ export const Products = () => {
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-          </div>
-        </div>
-      </div>
+        </>}
+      />
 
       <div className="w-full">
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">

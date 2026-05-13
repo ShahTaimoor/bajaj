@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/button';
  *   - children: ReactNode - Modal content
  *   - maxWidth: 'sm'|'md'|'lg'|'xl'|'full' - Max width of content area (default: 'xl')
  *   - variant: 'centered'|'scrollable' - Layout style (default: 'scrollable')
- *     - centered: vertically centered card with max viewport height; body scrolls inside the card
+ *     - centered: flex items-center justify-center, fixed height
  *     - scrollable: overflow-y-auto, content scrolls within viewport
  *   - showCloseButton: boolean - Show X in header (default: true when title present)
  *   - closeOnBackdrop: boolean - Close when backdrop clicked (default: true)
@@ -23,7 +23,7 @@ import { Button } from '@/components/ui/button';
  *   - className: string - Additional classes for the content container
  *   - contentClassName: string - Additional classes for scrollable content area
  *   - headerClassName: string - Additional classes for header
- *   - zIndex: number - z-index for overlay (default: 50)
+ *   - footerClassName: string - Extra classes on footer wrapper (optional)
  */
 const BaseModal = ({
   isOpen,
@@ -42,7 +42,8 @@ const BaseModal = ({
   contentClassName = '',
   headerClassName = '',
   zIndex = 50,
-  footer
+  footer,
+  footerClassName = '',
 }) => {
   useEffect(() => {
     if (!isOpen) return;
@@ -102,12 +103,8 @@ const BaseModal = ({
     >
       <div className={`${wrapperClasses} flex ${variant === 'centered' ? 'items-center justify-center min-h-full' : 'pt-20'} relative w-full min-w-0`}>
         <div
-          className={`relative mx-auto ${widthClasses} ${maxWidthClasses[maxWidth]} shadow-lg rounded-md bg-white flex flex-col min-h-0 ${
-            variant === 'scrollable'
-              ? 'max-h-[90vh]'
-              : variant === 'centered'
-                ? 'max-h-[min(92dvh,calc(100dvh-2rem))]'
-                : ''
+          className={`relative mx-auto ${widthClasses} ${maxWidthClasses[maxWidth]} shadow-lg rounded-md bg-white flex flex-col ${
+            variant === 'scrollable' ? 'max-h-[90vh]' : ''
           } ${className}`}
           onClick={(e) => e.stopPropagation()}
         >
@@ -140,15 +137,15 @@ const BaseModal = ({
           )}
 
           <div
-            className={`flex-1 min-h-0 ${
-              variant === 'scrollable' || variant === 'centered' ? 'overflow-y-auto overscroll-contain' : ''
+            className={`${
+              variant === 'scrollable' ? 'min-h-0 flex-1 overflow-y-auto' : 'flex-none overflow-visible'
             } ${contentClassName}`}
           >
             {children}
           </div>
 
           {footer && (
-            <div className="flex-shrink-0 p-5 border-t border-gray-200 bg-gray-50 rounded-b-md">
+            <div className={`flex-shrink-0 p-5 border-t border-gray-200 bg-gray-50 rounded-b-md ${footerClassName}`}>
               {footer}
             </div>
           )}

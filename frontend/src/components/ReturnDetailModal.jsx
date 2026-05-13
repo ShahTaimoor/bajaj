@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Printer } from 'lucide-react';
 import { useGetReturnQuery } from '../store/services/returnsApi';
 import { useCompanyInfo } from '../hooks/useCompanyInfo';
@@ -7,6 +7,7 @@ import { LoadingSpinner } from '../components/LoadingSpinner';
 import { PrintModal, ReturnPrintContent } from './print';
 import { showSuccessToast, showErrorToast } from '../utils/errorHandler';
 import { Button } from '@/components/ui/button';
+import { useSensitiveDataPermissions } from '../hooks/useSensitiveDataPermissions';
 
 const ReturnDetailModal = ({
   return: returnData,
@@ -17,9 +18,11 @@ const ReturnDetailModal = ({
   onAddNote,
   onAddCommunication,
   onUpdate,
-  isLoading
+  isLoading,
+  autoOpenPrint = false
 }) => {
   const actualReturnData = returnDataProp || returnData;
+  const { getPartyPermissions } = useSensitiveDataPermissions();
   const [showPrintModal, setShowPrintModal] = useState(false);
   const [showIssueRefundModal, setShowIssueRefundModal] = useState(false);
   const [issueRefundMethod, setIssueRefundMethod] = useState('cash');
@@ -33,6 +36,12 @@ const ReturnDetailModal = ({
 
   const { companyInfo } = useCompanyInfo();
   const returnInfo = detailedReturn?.data || detailedReturn || actualReturnData;
+
+  useEffect(() => {
+    if (autoOpenPrint && isOpen && returnInfo && !detailLoading) {
+      setShowPrintModal(true);
+    }
+  }, [autoOpenPrint, isOpen, returnInfo, detailLoading]);
 
   const getStatusColor = (status) => {
     const map = {
@@ -117,6 +126,9 @@ const ReturnDetailModal = ({
   const partyEmail = party?.email || '';
   const partyPhone = party?.phone || '';
   const partyAddress = formatAddress(party?.address || party?.businessAddress);
+  const { canViewPhone: canViewPartyPhone } = getPartyPermissions(
+    returnInfo.origin === 'purchase' ? 'supplier' : 'customer'
+  );
 
   const origRef = returnInfo.origin === 'purchase'
     ? (returnInfo.originalOrder?.invoiceNumber || returnInfo.originalOrder?.poNumber || 'N/A')
@@ -180,7 +192,7 @@ const ReturnDetailModal = ({
                 <div className="space-y-1">
                   <p className="font-medium">{partyName}</p>
                   {partyEmail && <p className="text-gray-600">{partyEmail}</p>}
-                  {partyPhone && <p className="text-gray-600">{partyPhone}</p>}
+                  {canViewPartyPhone && partyPhone && <p className="text-gray-600">{partyPhone}</p>}
                   {partyAddress && <p className="text-gray-600">{partyAddress}</p>}
                 </div>
               </div>

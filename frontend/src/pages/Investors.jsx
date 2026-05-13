@@ -38,6 +38,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { DeleteConfirmationDialog } from '../components/ConfirmationDialog';
 import { useDeleteConfirmation } from '../hooks/useConfirmation';
 import { useTab } from '../contexts/TabContext';
+import { PageHeader } from '../components/layout/PageHeader';
 
 /** Amount display without a currency prefix (e.g. no leading $). */
 function formatAmount(value) {
@@ -99,32 +100,40 @@ function openPrintDocument(title, innerHtml) {
     dateStyle: 'medium',
     timeStyle: 'short'
   });
-  const w = window.open('', '_blank');
+  const iframe = document.createElement('iframe');
+  iframe.style.position = 'fixed';
+  iframe.style.left = '-9999px';
+  iframe.style.top = '0';
+  iframe.style.width = '0';
+  iframe.style.height = '0';
+  document.body.appendChild(iframe);
+  const w = iframe.contentWindow;
   if (!w) {
-    toast.error('Pop-up blocked — allow pop-ups to print.');
+    document.body.removeChild(iframe);
     return;
   }
   w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; padding: 24px; color: #111827; }
+    @page { size: A4 landscape; margin: 10mm; }
+    body { font-family: 'Inter', system-ui, sans-serif; padding: 24px; color: #111827; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     h1 { font-size: 20px; margin: 0 0 6px; }
     .printed { color: #6b7280; font-size: 12px; margin: 0 0 20px; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; }
-    th { background: #f9fafb; text-align: left; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    th, td { border: 1px solid #000; padding: 4px 6px; }
+    th { background: #f3f4f6; text-align: left; font-weight: 600; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     td.num { text-align: right; font-variant-numeric: tabular-nums; }
     .note { margin-top: 16px; font-size: 11px; color: #6b7280; }
-    @media print { body { padding: 12px; } }
   </style></head><body>
   <h1>${escapeHtml(title)}</h1>
   <p class="printed">Printed on: ${escapeHtml(printedAt)}</p>
   ${innerHtml}
   </body></html>`);
   w.document.close();
-  w.focus();
-  requestAnimationFrame(() => {
+  setTimeout(() => {
+    w.focus();
     w.print();
-  });
+    setTimeout(() => document.body.removeChild(iframe), 1000);
+  }, 250);
 }
 
 const InvestorFormModal = ({ investor, onSave, onCancel, isSubmitting }) => {
@@ -502,37 +511,38 @@ export const Investors = ({ tabId }) => {
 
   return (
     <div className="p-4 sm:p-6">
-      <div className="flex items-center justify-between gap-2 mb-6">
-        <div className="min-w-0">
-          <h1 className="text-lg sm:text-3xl font-bold text-gray-900 truncate">Investors</h1>
-          <p className="hidden sm:block text-sm sm:text-base text-gray-600 mt-1">Manage investors and track profit distributions</p>
-        </div>
-        <div className="flex items-center gap-2 flex-shrink-0 overflow-x-auto">
-          <Button
-            type="button"
-            onClick={handlePrintInvestorsList}
-            variant="outline"
-            size="default"
-            className="flex items-center justify-center gap-2"
-            disabled={investors.length === 0}
-          >
-            <Printer className="h-4 w-4" />
-            <span>Print</span>
-          </Button>
-          <Button
-            onClick={() => {
-              setSelectedInvestor(null);
-              setIsModalOpen(true);
-            }}
-            variant="default"
-            size="default"
-            className="flex items-center justify-center gap-2"
-          >
-            <Plus className="h-4 w-4" />
-            <span>Add Investor</span>
-          </Button>
-        </div>
-      </div>
+      <PageHeader
+        className="mb-6"
+        title="Investors"
+        subtitle="Manage investors and track profit distributions"
+        actions={
+          <>
+            <Button
+              type="button"
+              onClick={handlePrintInvestorsList}
+              variant="outline"
+              size="default"
+              className="flex items-center justify-center gap-2"
+              disabled={investors.length === 0}
+            >
+              <Printer className="h-4 w-4" />
+              <span>Print</span>
+            </Button>
+            <Button
+              onClick={() => {
+                setSelectedInvestor(null);
+                setIsModalOpen(true);
+              }}
+              variant="default"
+              size="default"
+              className="flex items-center justify-center gap-2"
+            >
+              <Plus className="h-4 w-4" />
+              <span>Add Investor</span>
+            </Button>
+          </>
+        }
+      />
 
       {/* Search and Filters */}
       <div className="mb-6 flex flex-col sm:flex-row gap-4">
