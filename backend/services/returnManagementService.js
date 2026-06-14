@@ -658,7 +658,19 @@ class ReturnManagementService {
       const currentStock = Number(inventory.current_stock ?? inventory.currentStock ?? 0);
 
       if (isPurchaseReturn) {
-        if (currentStock < item.quantity) {
+        const settingsService = require('./settingsService');
+        const { isWarehouseInventoryEnabled } = require('../utils/warehouseInventory');
+        const companySettings = await settingsService.getCompanySettings();
+        if (isWarehouseInventoryEnabled(companySettings)) {
+          const warehouseStockRepository = require('../repositories/WarehouseStockRepository');
+          const locationStockService = require('./locationStockService');
+          const warehouse = await locationStockService.resolvePrimaryWarehouse(client);
+          const whRow = await warehouseStockRepository.findByWarehouseAndProduct(warehouse.id, productId, client);
+          const whQty = Number(whRow?.quantity ?? 0);
+          if (whQty < item.quantity) {
+            throw new Error(`Insufficient warehouse stock for product ${item.product?.name || productId}. Available: ${whQty}, Required: ${item.quantity}`);
+          }
+        } else if (currentStock < item.quantity) {
           throw new Error(`Insufficient stock for product ${item.product?.name || productId}. Available: ${currentStock}, Required: ${item.quantity}`);
         }
         await this.logInventoryMovement(
@@ -702,6 +714,41 @@ class ReturnManagementService {
       console.warn('logInventoryMovement: skipping item with no product id', item);
       return;
     }
+
+    const settingsService = require('./settingsService');
+    const { isWarehouseInventoryEnabled } = require('../utils/warehouseInventory');
+    const companySettings = await settingsService.getCompanySettings();
+    const qty = Math.abs(quantity);
+
+    if (isWarehouseInventoryEnabled(companySettings)) {
+      const locationStockService = require('./locationStockService');
+
+      if (type === 'out') {
+        await locationStockService.issueFromWarehouse({
+          productId,
+          quantity: qty,
+          reason: 'Purchase return',
+          referenceId: returnId,
+          referenceNumber: reference,
+          performedBy: userId,
+          notes: options.notes || 'Stock reduced for purchase return',
+        }, { client });
+        return;
+      }
+
+      if (type === 'return' && options.resellable !== false) {
+        await locationStockService.restoreToShop({
+          productId,
+          quantity: qty,
+          reason: 'Sale return',
+          referenceId: returnId,
+          referenceNumber: reference,
+          performedBy: userId,
+          notes: options.notes || 'Stock restored for sale return',
+        }, { client });
+        return;
+      }
+    }
     let inventory = await InventoryRepository.findOne({ product: productId, productId }, client);
     if (!inventory) {
       inventory = await InventoryRepository.create({
@@ -714,7 +761,6 @@ class ReturnManagementService {
       }, client);
     }
 
-    const qty = Math.abs(quantity);
     const currentStock = Number(inventory.current_stock ?? inventory.currentStock ?? 0);
 
     let movementType;
@@ -897,6 +943,18 @@ class ReturnManagementService {
           },
           client
         );
+        const dailyCashService = require('./dailyCashService');
+        const tillUserId = toUuid(
+          returnRequest.processed_by ?? returnRequest.processedBy ??
+          returnRequest.created_by ?? returnRequest.createdBy
+        );
+        if (tillUserId) {
+          await dailyCashService.recordRefund(tillUserId, {
+            returnId: returnRequest.id || returnRequest._id,
+            returnNumber: returnRequest.return_number || returnRequest.returnNumber,
+            amount: amt,
+          }, client);
+        }
       } else if (amt > 0 && (refundMethod === 'bank_transfer' || refundMethod === 'check')) {
         await this.createDoubleEntry(
           {
@@ -1586,6 +1644,12 @@ class ReturnManagementService {
           { ...payment, customer_id: customerId, customerId },
           client
         );
+        const dailyCashService = require('./dailyCashService');
+        await dailyCashService.recordRefund(userId, {
+          returnId,
+          returnNumber,
+          amount: refundAmount,
+        }, client);
       } else if (method === 'bank_transfer' || method === 'check') {
         const bankPaymentData = {
           date: date ? new Date(date) : new Date(),
